@@ -28,6 +28,18 @@ DEFAULT_DOMESTIC_SYMBOLS_PATH = os.path.join(
     "reports",
     "dashboard_domestic_symbols.json",
 )
+DEFAULT_US_WATCHLIST_EXPORT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "reports",
+    "watchlists",
+    "us_focus_watchlist.json",
+)
+DEFAULT_DOMESTIC_WATCHLIST_EXPORT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "reports",
+    "watchlists",
+    "domestic_kr_watchlist.json",
+)
 
 
 class TossDashboardWindow(object):
@@ -47,6 +59,8 @@ class TossDashboardWindow(object):
         self.db_path = db_path
         self.symbols_path = symbols_path
         self.domestic_symbols_path = domestic_symbols_path
+        self.us_watchlist_export_path = DEFAULT_US_WATCHLIST_EXPORT_PATH
+        self.domestic_watchlist_export_path = DEFAULT_DOMESTIC_WATCHLIST_EXPORT_PATH
         self.refresh_ms = max(5, int(refresh_sec)) * 1000
         self.snapshot = {}
         self.root.title("Toss Focused Dashboard")
@@ -112,8 +126,16 @@ class TossDashboardWindow(object):
             self.metric_vars[key] = var
             ttk.Label(frame, textvariable=var, style="MetricValue.TLabel").pack(anchor="w", pady=(4, 0))
 
-        panes = ttk.Panedwindow(self.root, orient="vertical")
-        panes.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+        main_tabs = ttk.Notebook(self.root)
+        main_tabs.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+
+        us_frame = ttk.Frame(main_tabs)
+        domestic_frame = ttk.Frame(main_tabs, padding=8)
+        main_tabs.add(us_frame, text="US Focus")
+        main_tabs.add(domestic_frame, text="Domestic KR")
+
+        panes = ttk.Panedwindow(us_frame, orient="vertical")
+        panes.pack(fill="both", expand=True)
 
         top = ttk.Frame(panes)
         bottom = ttk.Notebook(panes)
@@ -168,7 +190,6 @@ class TossDashboardWindow(object):
         paper_frame = ttk.Frame(bottom, padding=8)
         gpt_frame = ttk.Frame(bottom, padding=8)
         events_frame = ttk.Frame(bottom, padding=8)
-        domestic_frame = ttk.Frame(bottom, padding=8)
         context_frame = ttk.Frame(bottom, padding=8)
         tables_frame = ttk.Frame(bottom, padding=8)
         bottom.add(summary_frame, text="Summary")
@@ -178,7 +199,6 @@ class TossDashboardWindow(object):
         bottom.add(paper_frame, text="Paper")
         bottom.add(gpt_frame, text="GPT By Symbol")
         bottom.add(events_frame, text="Events By Symbol")
-        bottom.add(domestic_frame, text="Domestic KR")
         bottom.add(context_frame, text="Context")
         bottom.add(tables_frame, text="Tables")
 
@@ -227,11 +247,22 @@ class TossDashboardWindow(object):
             self.event_tree.column(col, width=width, anchor="w")
         self.event_tree.pack(fill="both", expand=True)
 
-        domestic_columns = ("code", "name", "samples", "avg5", "avg10", "avg30", "avg60", "win", "worst", "signal")
-        self.domestic_tree = ttk.Treeview(domestic_frame, columns=domestic_columns, show="headings")
+        domestic_panes = ttk.Panedwindow(domestic_frame, orient="vertical")
+        domestic_panes.pack(fill="both", expand=True)
+        domestic_top = ttk.Frame(domestic_panes)
+        domestic_bottom = ttk.Notebook(domestic_panes)
+        domestic_panes.add(domestic_top, weight=3)
+        domestic_panes.add(domestic_bottom, weight=2)
+
+        domestic_columns = ("code", "name", "decision", "score", "risk", "confidence", "samples", "avg5", "avg10", "avg30", "avg60", "win", "worst", "signal")
+        self.domestic_tree = ttk.Treeview(domestic_top, columns=domestic_columns, show="headings", selectmode="browse")
         domestic_headings = {
             "code": "Code",
             "name": "Name",
+            "decision": "Decision",
+            "score": "Score",
+            "risk": "Risk",
+            "confidence": "Confidence",
             "samples": "Samples",
             "avg5": "5m Avg",
             "avg10": "10m Avg",
@@ -242,12 +273,54 @@ class TossDashboardWindow(object):
             "signal": "Latest Signal",
         }
         for col, width in [
-            ("code", 90), ("name", 120), ("samples", 80), ("avg5", 80), ("avg10", 80),
+            ("code", 90), ("name", 120), ("decision", 100), ("score", 70), ("risk", 80), ("confidence", 90),
+            ("samples", 80), ("avg5", 80), ("avg10", 80),
             ("avg30", 80), ("avg60", 80), ("win", 70), ("worst", 90), ("signal", 360),
         ]:
             self.domestic_tree.heading(col, text=domestic_headings[col])
-            self.domestic_tree.column(col, width=width, anchor="e" if col not in ("code", "name", "signal") else "w")
-        self.domestic_tree.pack(fill="both", expand=True)
+            self.domestic_tree.column(col, width=width, anchor="e" if col not in ("code", "name", "decision", "risk", "confidence", "signal") else "w")
+        self.domestic_tree.pack(fill="both", expand=True, side="left")
+        domestic_scroll = ttk.Scrollbar(domestic_top, orient="vertical", command=self.domestic_tree.yview)
+        self.domestic_tree.configure(yscrollcommand=domestic_scroll.set)
+        domestic_scroll.pack(fill="y", side="right")
+        self.domestic_tree.bind("<<TreeviewSelect>>", self._on_domestic_selected)
+
+        domestic_summary_frame = ttk.Frame(domestic_bottom, padding=8)
+        domestic_detail_frame = ttk.Frame(domestic_bottom, padding=8)
+        domestic_feedback_frame = ttk.Frame(domestic_bottom, padding=8)
+        domestic_signal_frame = ttk.Frame(domestic_bottom, padding=8)
+        domestic_gpt_frame = ttk.Frame(domestic_bottom, padding=8)
+        domestic_bottom.add(domestic_summary_frame, text="Summary")
+        domestic_bottom.add(domestic_detail_frame, text="Details")
+        domestic_bottom.add(domestic_feedback_frame, text="Feedback")
+        domestic_bottom.add(domestic_signal_frame, text="Signal")
+        domestic_bottom.add(domestic_gpt_frame, text="GPT")
+
+        self.domestic_summary_text = tk.Text(domestic_summary_frame, wrap="word", height=8, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.domestic_summary_text.pack(fill="both", expand=True)
+        self.domestic_summary_text.configure(state="disabled")
+
+        self.domestic_detail_text = tk.Text(domestic_detail_frame, wrap="word", height=8, font=("Consolas", 10), relief="solid", borderwidth=1)
+        self.domestic_detail_text.pack(fill="both", expand=True)
+        self.domestic_detail_text.configure(state="disabled")
+
+        domestic_feedback_columns = ("horizon", "samples", "win", "avg", "avg_win", "avg_loss", "best", "worst", "best_path", "worst_path")
+        self.domestic_feedback_tree = ttk.Treeview(domestic_feedback_frame, columns=domestic_feedback_columns, show="headings")
+        for col, width in [
+            ("horizon", 80), ("samples", 80), ("win", 80), ("avg", 90), ("avg_win", 90),
+            ("avg_loss", 90), ("best", 90), ("worst", 90), ("best_path", 90), ("worst_path", 90),
+        ]:
+            self.domestic_feedback_tree.heading(col, text=col.replace("_", " ").title())
+            self.domestic_feedback_tree.column(col, width=width, anchor="e")
+        self.domestic_feedback_tree.pack(fill="both", expand=True)
+
+        self.domestic_signal_text = tk.Text(domestic_signal_frame, wrap="word", height=8, font=("Consolas", 10), relief="solid", borderwidth=1)
+        self.domestic_signal_text.pack(fill="both", expand=True)
+        self.domestic_signal_text.configure(state="disabled")
+
+        self.domestic_gpt_text = tk.Text(domestic_gpt_frame, wrap="word", height=8, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.domestic_gpt_text.pack(fill="both", expand=True)
+        self.domestic_gpt_text.configure(state="disabled")
 
         self.context_text = tk.Text(context_frame, wrap="word", height=8, font=("Consolas", 10), relief="solid", borderwidth=1)
         self.context_text.pack(fill="both", expand=True)
@@ -351,6 +424,11 @@ class TossDashboardWindow(object):
         if selection:
             self._show_symbol_details(selection[0])
 
+    def _on_domestic_selected(self, _event=None):
+        selection = self.domestic_tree.selection()
+        if selection:
+            self._show_domestic_details(selection[0])
+
     def _show_symbol_details(self, symbol):
         for row in self.snapshot.get("symbols") or []:
             if row.get("symbol") == symbol:
@@ -375,7 +453,8 @@ class TossDashboardWindow(object):
             return
         self.symbols = symbols
         save_symbols(symbols, self.symbols_path)
-        self.status_var.set("Saved symbols: {}".format(",".join(symbols)))
+        export_path = save_watchlist_file(symbols, self.us_watchlist_export_path, market="US", label="US Focus")
+        self.status_var.set("Saved US symbols: {} -> {}".format(",".join(symbols), export_path))
         self.symbol_tree.selection_remove(*self.symbol_tree.selection())
         self.refresh()
 
@@ -386,7 +465,8 @@ class TossDashboardWindow(object):
             return
         self.domestic_symbols = symbols
         save_symbols(symbols, self.domestic_symbols_path)
-        self.status_var.set("Saved KR symbols: {}".format(",".join(symbols)))
+        export_path = save_watchlist_file(symbols, self.domestic_watchlist_export_path, market="KR", label="Domestic KR")
+        self.status_var.set("Saved KR symbols: {} -> {}".format(",".join(symbols), export_path))
         self.refresh()
 
     def _show_gpt_for(self, symbol):
@@ -458,6 +538,7 @@ class TossDashboardWindow(object):
             worst_values = [_to_float(item.get("worst_path_return_pct")) for item in row.get("feedback") or []]
             worst_path = min(worst_values) if worst_values else 0.0
             signal = row.get("signal") or {}
+            analysis = row.get("analysis") or {}
             signal_text = "{} | score {} | risk {} | count {} | {}".format(
                 signal.get("latest_action_hint") or "-",
                 _fmt(signal.get("latest_confidence_score"), 0),
@@ -468,6 +549,10 @@ class TossDashboardWindow(object):
             self.domestic_tree.insert("", "end", iid=row.get("code"), values=(
                 row.get("code"),
                 row.get("name"),
+                analysis.get("final_decision") or "-",
+                _fmt(analysis.get("interest_score"), 0),
+                analysis.get("risk_level") or "-",
+                analysis.get("confidence") or "-",
                 sample_count,
                 _fmt((horizons.get(5) or {}).get("avg_return_pct"), 4, signed=True),
                 _fmt((horizons.get(10) or {}).get("avg_return_pct"), 4, signed=True),
@@ -477,10 +562,145 @@ class TossDashboardWindow(object):
                 _fmt(worst_path, 4, signed=True),
                 signal_text,
             ))
+        children = self.domestic_tree.get_children()
+        if children and not self.domestic_tree.selection():
+            self.domestic_tree.selection_set(children[0])
+        selection = self.domestic_tree.selection()
+        self._show_domestic_details(selection[0] if selection else None)
+
+    def _show_domestic_details(self, code):
+        row = None
+        for item in (self.snapshot or {}).get("domestic") or []:
+            if item.get("code") == code:
+                row = item
+                break
+        if not row:
+            self._set_text(self.domestic_summary_text, "")
+            self._set_text(self.domestic_detail_text, "")
+            self._set_text(self.domestic_signal_text, "")
+            self._set_text(self.domestic_gpt_text, "")
+            self.domestic_feedback_tree.delete(*self.domestic_feedback_tree.get_children())
+            return
+        self._set_text(self.domestic_summary_text, self._domestic_summary_for(row))
+        self._set_text(self.domestic_detail_text, self._domestic_detail_for(row))
+        self._set_text(self.domestic_signal_text, self._domestic_signal_for(row))
+        self._set_text(self.domestic_gpt_text, self._domestic_gpt_for(row))
+        self.domestic_feedback_tree.delete(*self.domestic_feedback_tree.get_children())
+        for item in row.get("feedback") or []:
+            self.domestic_feedback_tree.insert("", "end", values=(
+                "{}m".format(item.get("horizon_min")),
+                item.get("sample_count"),
+                _fmt(item.get("win_rate"), 4),
+                _fmt(item.get("avg_return_pct"), 4, signed=True),
+                _fmt(item.get("avg_win_return_pct"), 4, signed=True),
+                _fmt(item.get("avg_loss_return_pct"), 4, signed=True),
+                _fmt(item.get("best_return_pct"), 4, signed=True),
+                _fmt(item.get("worst_return_pct"), 4, signed=True),
+                _fmt(item.get("best_path_return_pct"), 4, signed=True),
+                _fmt(item.get("worst_path_return_pct"), 4, signed=True),
+            ))
+
+    def _domestic_summary_for(self, row):
+        feedback = row.get("feedback") or []
+        signal = row.get("signal") or {}
+        analysis = row.get("analysis") or {}
+        relationship = self._relationship_summary_for_code(row.get("code"))
+        samples = sum(_to_int(item.get("sample_count")) for item in feedback)
+        avg_rows = [item for item in feedback if _to_int(item.get("sample_count")) > 0]
+        weighted_return = sum(_to_float(item.get("avg_return_pct")) * _to_int(item.get("sample_count")) for item in avg_rows)
+        weighted_win = sum(_to_float(item.get("win_rate")) * _to_int(item.get("sample_count")) for item in avg_rows)
+        avg_return = weighted_return / samples if samples else 0.0
+        win_rate = weighted_win / samples if samples else 0.0
+        worst_paths = [_to_float(item.get("worst_path_return_pct")) for item in feedback]
+        best_paths = [_to_float(item.get("best_path_return_pct")) for item in feedback]
+        lines = [
+            "{} {} | source {}".format(row.get("code"), row.get("name") or "-", row.get("source") or "-"),
+            "",
+            "GPT decision: {} | score {} | risk {} | confidence {}".format(
+                analysis.get("final_decision") or "-",
+                _fmt(analysis.get("interest_score"), 0),
+                analysis.get("risk_level") or "-",
+                analysis.get("confidence") or "-",
+            ),
+            "GPT analyzed_at: {}".format(analysis.get("analyzed_at") or "-"),
+            "",
+            "Feedback samples: {}".format(samples),
+            "Weighted avg return: {}".format(_fmt(avg_return, 4, signed=True)),
+            "Weighted win rate: {}".format(_fmt(win_rate, 4)),
+            "Best path: {}".format(_fmt(max(best_paths) if best_paths else 0.0, 4, signed=True)),
+            "Worst path: {}".format(_fmt(min(worst_paths) if worst_paths else 0.0, 4, signed=True)),
+            "",
+            "Latest signal: {} | score {} | risk {} | count {}".format(
+                signal.get("latest_action_hint") or "-",
+                _fmt(signal.get("latest_confidence_score"), 0),
+                signal.get("latest_risk_level") or "-",
+                signal.get("signal_count") or 0,
+            ),
+            "Signal time: {}".format(signal.get("latest_detected_at") or "-"),
+        ]
+        if relationship:
+            lines.extend(["", relationship])
+        return "\n".join(lines)
+
+    def _domestic_detail_for(self, row):
+        lines = [
+            "Domestic KR Detail",
+            "  code: {}".format(row.get("code")),
+            "  name: {}".format(row.get("name") or "-"),
+            "  source: {}".format(row.get("source") or "-"),
+            "",
+            "Horizons",
+        ]
+        for item in row.get("feedback") or []:
+            lines.append(
+                "  {horizon}m samples={samples} win={win} avg={avg} best={best} worst={worst} worst_path={worst_path}".format(
+                    horizon=item.get("horizon_min"),
+                    samples=item.get("sample_count"),
+                    win=_fmt(item.get("win_rate"), 4),
+                    avg=_fmt(item.get("avg_return_pct"), 4, signed=True),
+                    best=_fmt(item.get("best_return_pct"), 4, signed=True),
+                    worst=_fmt(item.get("worst_return_pct"), 4, signed=True),
+                    worst_path=_fmt(item.get("worst_path_return_pct"), 4, signed=True),
+                )
+            )
+        return "\n".join(lines)
+
+    def _domestic_signal_for(self, row):
+        signal = row.get("signal") or {}
+        if not signal:
+            return "No imported signal summary."
+        lines = [
+            "Signal Summary",
+            "  source: {}".format(signal.get("source") or "-"),
+            "  code: {}".format(signal.get("code") or "-"),
+            "  name: {}".format(signal.get("name") or "-"),
+            "  latest_detected_at: {}".format(signal.get("latest_detected_at") or "-"),
+            "  latest_action_hint: {}".format(signal.get("latest_action_hint") or "-"),
+            "  latest_confidence_score: {}".format(_fmt(signal.get("latest_confidence_score"), 0)),
+            "  latest_risk_level: {}".format(signal.get("latest_risk_level") or "-"),
+            "  signal_count: {}".format(signal.get("signal_count") or 0),
+            "  imported_at: {}".format(signal.get("imported_at") or "-"),
+        ]
+        return "\n".join(lines)
+
+    def _domestic_gpt_for(self, row):
+        latest_gpt = (self.snapshot or {}).get("domestic_latest_gpt") or {}
+        sections = (self.snapshot or {}).get("domestic_gpt_sections") or {}
+        code = row.get("code")
+        header = "Domestic Analysis #{} | {} | {} | tokens {}\n".format(
+            latest_gpt.get("id") or "-",
+            latest_gpt.get("analyzed_at") or "-",
+            latest_gpt.get("model") or "-",
+            latest_gpt.get("total_tokens") or 0,
+        )
+        body = sections.get(code) or ((row.get("analysis") or {}).get("summary")) or "No domestic GPT section found for {}.".format(code)
+        return "{}Code: {}\n\n{}".format(header, code, body)
 
     def _render_context(self):
         context = (self.snapshot or {}).get("latest_context") or {}
         payload = _parse_json(context.get("payload_json"))
+        relationship = (self.snapshot or {}).get("relationship") or {}
+        quality = relationship.get("data_quality") or {}
         lines = [
             "Latest Market Context",
             "  collected_at: {}".format(context.get("collected_at") or "-"),
@@ -494,12 +714,68 @@ class TossDashboardWindow(object):
         for key in ("price", "candle", "context"):
             row = latest.get(key) or {}
             lines.append("  {}: {}".format(key, row.get("collected_at") or row.get("latest_timestamp") or "-"))
+        lines.extend([
+            "",
+            "KR-US Relationship",
+            "  regime: {}".format(relationship.get("relationship_regime") or "insufficient_evidence"),
+            "  paired_observation_count: {}".format(quality.get("paired_observation_count") or 0),
+            "  min_samples: {}".format(quality.get("min_samples") or "-"),
+            "  warning: {}".format(quality.get("warning") or "-"),
+            "  proxy_alignment: {}".format("yes" if quality.get("uses_proxy_alignment") else "no"),
+        ])
+        pairs = relationship.get("pairs") or []
+        if pairs:
+            lines.append("  pairs:")
+            for item in pairs[:8]:
+                lines.append(
+                    "    {kr}->{us} lag={lag} n={samples} corr={corr} regime={regime}".format(
+                        kr=item.get("source_symbol") or "-",
+                        us=item.get("target_symbol") or "-",
+                        lag=item.get("lag_label") or "-",
+                        samples=item.get("paired_sample_count") or 0,
+                        corr=_fmt(item.get("correlation"), 4, signed=True),
+                        regime=item.get("relationship_regime") or "-",
+                    )
+                )
+        else:
+            lines.append("  pairs: no paired correlation evidence yet")
         if payload:
             lines.append("")
             lines.append("Context Payload")
             for key in sorted(payload):
                 lines.append("  {}: {}".format(key, payload.get(key)))
         self._set_text(self.context_text, "\n".join(lines))
+
+    def _relationship_summary_for_code(self, code):
+        relationship = (self.snapshot or {}).get("relationship") or {}
+        if not relationship:
+            return ""
+        quality = relationship.get("data_quality") or {}
+        lines = [
+            "KR-US Relationship",
+            "  regime: {}".format(relationship.get("relationship_regime") or "insufficient_evidence"),
+            "  paired_observation_count: {}".format(quality.get("paired_observation_count") or 0),
+            "  warning: {}".format(quality.get("warning") or "-"),
+        ]
+        pairs = [
+            item for item in relationship.get("pairs") or []
+            if item.get("source_symbol") == code
+        ]
+        if pairs:
+            for item in pairs[:6]:
+                lines.append(
+                    "  {kr}->{us} lag={lag} n={samples} corr={corr} regime={regime}".format(
+                        kr=item.get("source_symbol") or "-",
+                        us=item.get("target_symbol") or "-",
+                        lag=item.get("lag_label") or "-",
+                        samples=item.get("paired_sample_count") or 0,
+                        corr=_fmt(item.get("correlation"), 4, signed=True),
+                        regime=item.get("relationship_regime") or "-",
+                    )
+                )
+        else:
+            lines.append("  no paired rows for {}".format(code or "-"))
+        return "\n".join(lines)
 
     def _detail_text_for(self, row):
         detail = row.get("detail") or {}
@@ -658,11 +934,13 @@ def main(argv=None):
     if args.symbols:
         symbols = [item.strip().upper() for item in args.symbols.split(",") if item.strip()]
         save_symbols(symbols, args.symbols_path)
+        save_watchlist_file(symbols, DEFAULT_US_WATCHLIST_EXPORT_PATH, market="US", label="US Focus")
     else:
         symbols = load_symbols(args.symbols_path) or list(config.FOCUSED_NASDAQ_WATCHLIST)
     if args.domestic_symbols:
         domestic_symbols = [item.strip() for item in args.domestic_symbols.split(",") if item.strip()]
         save_symbols(domestic_symbols, args.domestic_symbols_path)
+        save_watchlist_file(domestic_symbols, DEFAULT_DOMESTIC_WATCHLIST_EXPORT_PATH, market="KR", label="Domestic KR")
     else:
         domestic_symbols = load_symbols(args.domestic_symbols_path) or ["005930", "000660"]
     root = tk.Tk()
@@ -697,6 +975,30 @@ def save_symbols(symbols, path=DEFAULT_SYMBOLS_PATH):
         json.dump({"symbols": cleaned}, handle, ensure_ascii=False, indent=2, sort_keys=True)
     os.replace(tmp_path, os.path.abspath(path))
     return cleaned
+
+
+def save_watchlist_file(symbols, path, market, label):
+    cleaned = [str(item).strip().upper() for item in symbols or [] if str(item).strip()]
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    payload = {
+        "label": label,
+        "market": market,
+        "symbols": cleaned,
+        "symbol_count": len(cleaned),
+        "saved_at": _now_text(),
+        "orders_enabled": False,
+        "note": "Saved from Toss dashboard UI. Collection process must be restarted to change live collection symbols.",
+    }
+    tmp_path = os.path.abspath(path) + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_path, os.path.abspath(path))
+    return os.path.abspath(path)
+
+
+def _now_text():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _fmt(value, decimals=2, signed=False):

@@ -151,6 +151,12 @@ class TossInvestClient(object):
                         return {}
                     return json.loads(data.decode("utf-8"))
             except urllib.error.HTTPError as exc:
+                if auth and exc.code == 401 and attempt < 2:
+                    self._access_token = None
+                    headers["Authorization"] = "Bearer {}".format(self._get_access_token())
+                    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+                    safe = sanitize_payload({"method": method, "path": path, "query": query, "headers": headers})
+                    continue
                 if exc.code == 429 and attempt < 2:
                     retry_after = exc.headers.get("Retry-After")
                     wait = float(retry_after) if retry_after else delay

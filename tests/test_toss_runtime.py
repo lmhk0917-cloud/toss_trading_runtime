@@ -13,7 +13,8 @@ if PROJECT_ROOT not in sys.path:
 from toss_trading_runtime.client import TossInvestClient, TossInvestClientError
 from toss_trading_runtime.analysis_history import attach_previous_analysis_context, build_previous_analysis_context, compare_structured_to_previous
 from toss_trading_runtime.dashboard import build_dashboard_snapshot, format_summary_text, render_dashboard_html
-from toss_trading_runtime.dashboard_window import load_symbols, save_symbols
+from toss_trading_runtime.dashboard_window import load_symbols, save_symbols, save_watchlist_file
+from toss_trading_runtime.domestic_analysis import collect_domestic_evidence
 from toss_trading_runtime.domestic_import import load_kiwoom_summaries
 from toss_trading_runtime.evidence import collect_read_only_evidence
 from toss_trading_runtime.focused_analysis import collect_focused_evidence, summarize_candles
@@ -22,6 +23,7 @@ from toss_trading_runtime.feedback import attach_feedback_adjustments, build_fee
 from toss_trading_runtime.market_calendar import current_kr_session, current_us_session
 from toss_trading_runtime.openai_gpt import TossGptAnalyzer, TossGptError
 from toss_trading_runtime.order_safety import TossOrderSafetyGate
+from toss_trading_runtime.relationship_analysis import build_relationship_evidence
 from toss_trading_runtime.runtime_health import build_runtime_health
 from toss_trading_runtime.screener import score_symbol
 from toss_trading_runtime.store import TossRuntimeStore
@@ -561,6 +563,48 @@ def test_dashboard_snapshot_and_html_render():
             "latest_risk_level": "MEDIUM",
             "signal_count": 3,
         }])
+        store.save_relationship_observations([
+            {
+                "observed_at": "2026-06-16 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "AAPL",
+                "source_return_pct": 0.10,
+                "target_return_pct": 0.20,
+                "lag_label": "kr_close_to_us_regular",
+            },
+            {
+                "observed_at": "2026-06-17 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "AAPL",
+                "source_return_pct": 0.20,
+                "target_return_pct": 0.40,
+                "lag_label": "kr_close_to_us_regular",
+            },
+            {
+                "observed_at": "2026-06-18 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "AAPL",
+                "source_return_pct": 0.30,
+                "target_return_pct": 0.60,
+                "lag_label": "kr_close_to_us_regular",
+            },
+            {
+                "observed_at": "2026-06-19 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "AAPL",
+                "source_return_pct": 0.40,
+                "target_return_pct": 0.80,
+                "lag_label": "kr_close_to_us_regular",
+            },
+            {
+                "observed_at": "2026-06-20 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "AAPL",
+                "source_return_pct": 0.50,
+                "target_return_pct": 1.00,
+                "lag_label": "kr_close_to_us_regular",
+            },
+        ])
         snapshot = build_dashboard_snapshot(store, symbols=["AAPL"])
         html = render_dashboard_html(snapshot)
         assert snapshot["symbols"][0]["score_delta"] == 10
@@ -572,12 +616,70 @@ def test_dashboard_snapshot_and_html_render():
         assert "paper_candidates" in snapshot
         assert snapshot["symbols"][0]["return_feedback"]["samples"] == 0
         assert snapshot["domestic"][0]["code"] == "005930"
+        assert snapshot["relationship"]["relationship_regime"] == "strong"
         assert "Toss Focused Dashboard" in html
         assert "Domestic Market" in html
+        assert "KR-US Relationship" in html
         assert "AAPL" in html
         formatted = format_summary_text("AAPL **EVIDENCE:** - one - two **NEXT CHECKS:** done")
         assert "\n\nEVIDENCE:" in formatted
         assert "\n- one" in formatted
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_relationship_evidence_blocks_correlation_claim_without_pairs():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        store.upsert_domestic_feedback_summary([{
+            "source": "kiwoom_personal_ver1",
+            "code": "005930",
+            "name": "Samsung Electronics",
+            "horizon_min": 5,
+            "sample_count": 10,
+            "win_rate": 0.6,
+            "avg_return_pct": 0.2,
+            "avg_win_return_pct": 0.4,
+            "avg_loss_return_pct": -0.2,
+            "best_return_pct": 1.0,
+            "worst_return_pct": -0.5,
+            "best_path_return_pct": 1.2,
+            "worst_path_return_pct": -0.7,
+        }])
+        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=3)
+        assert evidence["relationship_regime"] == "insufficient_evidence"
+        assert evidence["data_quality"]["warning"]
+        assert evidence["data_quality"]["uses_proxy_alignment"]
+        assert evidence["proxy_alignment"]["domestic"]["005930"]["sample_count"] == 10
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_relationship_evidence_detects_strong_paired_relationship():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        rows = []
+        for index, value in enumerate([0.1, 0.2, -0.1, 0.4, -0.3], start=1):
+            rows.append({
+                "observed_at": "2026-06-{:02d} 15:40:00".format(index),
+                "source_symbol": "005930",
+                "target_symbol": "NVDA",
+                "source_return_pct": value,
+                "target_return_pct": value * 2,
+                "lag_label": "kr_close_to_us_regular",
+            })
+        store.save_relationship_observations(rows)
+        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=5)
+        assert evidence["relationship_regime"] == "strong"
+        assert evidence["data_quality"]["warning"] is None
+        assert evidence["pairs"][0]["paired_sample_count"] == 5
+        assert evidence["pairs"][0]["correlation"] >= 0.65
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -590,6 +692,22 @@ def test_dashboard_window_symbol_persistence():
         saved = save_symbols(["mu", " nvda ", "QQQ"], tmp.name)
         assert saved == ["MU", "NVDA", "QQQ"]
         assert load_symbols(tmp.name) == ["MU", "NVDA", "QQQ"]
+    finally:
+        os.unlink(tmp.name)
+
+
+def test_dashboard_window_watchlist_file_persistence():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    try:
+        path = save_watchlist_file(["mu", " nvda ", "QQQ"], tmp.name, market="US", label="US Focus")
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        assert payload["market"] == "US"
+        assert payload["label"] == "US Focus"
+        assert payload["symbols"] == ["MU", "NVDA", "QQQ"]
+        assert payload["symbol_count"] == 3
+        assert not payload["orders_enabled"]
     finally:
         os.unlink(tmp.name)
 
@@ -647,6 +765,61 @@ def test_domestic_import_loads_kiwoom_feedback_summary():
         os.unlink(tmp.name)
 
 
+def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        store.upsert_domestic_feedback_summary([{
+            "source": "kiwoom_personal_ver1",
+            "code": "005930",
+            "name": "Samsung Electronics",
+            "horizon_min": 5,
+            "sample_count": 10,
+            "win_rate": 0.6,
+            "avg_return_pct": 0.2,
+            "avg_win_return_pct": 0.4,
+            "avg_loss_return_pct": -0.2,
+            "best_return_pct": 1.0,
+            "worst_return_pct": -0.5,
+            "best_path_return_pct": 1.2,
+            "worst_path_return_pct": -0.7,
+        }])
+        store.upsert_domestic_signal_summary([{
+            "source": "kiwoom_personal_ver1",
+            "code": "005930",
+            "name": "Samsung Electronics",
+            "latest_detected_at": "2026-06-16 09:10:00",
+            "latest_action_hint": "WATCH",
+            "latest_confidence_score": 70,
+            "latest_risk_level": "MEDIUM",
+            "signal_count": 2,
+        }])
+        evidence = collect_domestic_evidence(None, store, ["005930"])
+        assert evidence["safe_for_analysis"]
+        assert evidence["data_quality"]["feedback_only"]
+
+        class FakeDomesticOpenAi(object):
+            def __init__(self):
+                self.body = None
+
+            def __call__(self, request, timeout=45):
+                self.body = request.data.decode("utf-8")
+                return FakeResponse({
+                    "model": "gpt-4o-mini-test",
+                    "choices": [{"message": {"content": "SYMBOL: 005930\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\n국내장 분석"}}],
+                    "usage": {"total_tokens": 20},
+                })
+
+        opener = FakeDomesticOpenAi()
+        gpt = TossGptAnalyzer(api_key="sk-test", opener=opener).analyze_domestic_evidence(evidence, ["005930"])
+        assert "domestic Korean-market" in opener.body
+        assert "005930" in gpt["analysis"]
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     tests = [
         test_client_uses_read_only_endpoints_and_account_header,
@@ -668,8 +841,12 @@ if __name__ == "__main__":
         test_runtime_health_and_supervisor_summary_payload,
         test_market_session_stage_records_success_and_failure,
         test_dashboard_snapshot_and_html_render,
+        test_relationship_evidence_blocks_correlation_claim_without_pairs,
+        test_relationship_evidence_detects_strong_paired_relationship,
         test_dashboard_window_symbol_persistence,
+        test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,
+        test_domestic_evidence_and_gpt_payload_use_imported_feedback,
     ]
     for test in tests:
         test()

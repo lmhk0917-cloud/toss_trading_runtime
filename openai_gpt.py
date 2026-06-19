@@ -55,6 +55,13 @@ class TossGptAnalyzer(object):
         payload = self._build_focused_payload(evidence, symbols=symbols)
         return self._analyze_payload(payload)
 
+    def analyze_domestic_evidence(self, evidence, symbols=None):
+        missing = self.validate_config()
+        if missing:
+            raise TossGptError("missing environment variables: {}".format(",".join(missing)))
+        payload = self._build_domestic_payload(evidence, symbols=symbols)
+        return self._analyze_payload(payload)
+
     def _analyze_payload(self, payload):
         response = self._call_chat_completions(payload)
         content = (((response.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
@@ -120,11 +127,52 @@ class TossGptAnalyzer(object):
             "7. Next checks by session: premarket, regular market, and after-hours checks.\n\n"
             "Rules:\n"
             "- Do not make entry or exit decisions from GPT alone.\n"
+            "- If market_relationship exists, distinguish strong, weak, mixed, and insufficient_evidence regimes from the supplied paired_sample_count and correlation fields.\n"
+            "- Never claim KR-US semiconductor correlation is strong when market_relationship.data_quality.warning is present.\n"
+            "- Treat market_relationship.proxy_alignment as directional context only, not correlation proof.\n"
             "- If evidence is weak, lower INTEREST_SCORE and state hold/watch conditions.\n"
             "- If return feedback is negative or worst_path_return_pct is poor, lower INTEREST_SCORE even if momentum looks good.\n"
             "- If return feedback is positive with enough samples, explain why confidence can improve.\n"
             "- If QQQ, SPY, or SMH are present, use them as context for semiconductor names.\n"
             "- Treat premarket evidence as lower confidence than regular-session confirmation.\n"
+            "- Never imply order execution, guaranteed profit, or certainty.\n\n"
+            "EVIDENCE_JSON:\n{data_json}"
+        ).format(symbols=target_symbols, data_json=data_json)
+        return self._chat_payload(system_prompt, user_prompt, max(self.max_tokens, 1400))
+
+    def _build_domestic_payload(self, evidence, symbols=None):
+        safe_evidence = sanitize_payload(evidence or {})
+        data_json = json.dumps(safe_evidence, ensure_ascii=False, default=str, separators=(",", ":"))
+        target_symbols = ", ".join(symbols or safe_evidence.get("symbols") or [])
+        system_prompt = (
+            "You are a conservative Korean domestic-stock analysis engine. "
+            "You combine imported Kiwoom feedback with current Toss Invest read-only "
+            "market evidence when available. You never place orders. Reply in Korean "
+            "with clear labels."
+        )
+        user_prompt = (
+            "Run domestic Korean-market focused analysis.\n"
+            "Target symbols: {symbols}\n\n"
+            "Reply in Korean, but each symbol section must begin with these exact labels:\n"
+            "SYMBOL: <code>\n"
+            "DECISION: WATCH | OBSERVE | HOLD | RISK | AVOID\n"
+            "INTEREST_SCORE: <0-100>\n"
+            "RISK_LEVEL: LOW | MEDIUM | HIGH\n"
+            "CONFIDENCE: LOW | MEDIUM | HIGH\n\n"
+            "Required sections:\n"
+            "1. Korean summary conclusion by domestic code/name.\n"
+            "2. Imported Kiwoom feedback: 5m/10m/30m/60m avg_return_pct, win_rate, worst_path_return_pct, and sample_count.\n"
+            "3. Latest signal: action_hint, confidence_score, risk_level, signal_count, and detected time.\n"
+            "4. Toss live evidence if available: price, 1-minute candles, daily candles, FX, and KRX/NXT session.\n"
+            "5. Data gaps: explicitly state whether Toss live data is missing and whether the analysis is feedback-only.\n"
+            "6. Next checks for Korean pre-market, regular market, and after-market.\n\n"
+            "Rules:\n"
+            "- Do not make entry or exit decisions from GPT alone.\n"
+            "- Use market_relationship to explain the US-to-next-KR loop only when paired observations support it.\n"
+            "- If relationship_regime is insufficient_evidence, explicitly say the US/KR relationship is not proven for this window.\n"
+            "- Do not confuse proxy alignment with true rolling or lead-lag correlation.\n"
+            "- If imported feedback is weak or worst_path_return_pct is poor, lower INTEREST_SCORE.\n"
+            "- If only imported historical feedback exists, keep CONFIDENCE LOW or MEDIUM at most.\n"
             "- Never imply order execution, guaranteed profit, or certainty.\n\n"
             "EVIDENCE_JSON:\n{data_json}"
         ).format(symbols=target_symbols, data_json=data_json)

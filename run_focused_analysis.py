@@ -15,6 +15,7 @@ try:
     from .feedback import attach_feedback_adjustments
     from .focused_analysis import collect_focused_evidence
     from .openai_gpt import OPENAI_API_KEY_ENV, TossGptAnalyzer
+    from .relationship_analysis import build_relationship_evidence
     from .security import sanitize_payload
     from .store import TossRuntimeStore
     from .structured_analysis import extract_structured_analysis
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover
     from feedback import attach_feedback_adjustments
     from focused_analysis import collect_focused_evidence
     from openai_gpt import OPENAI_API_KEY_ENV, TossGptAnalyzer
+    from relationship_analysis import build_relationship_evidence
     from security import sanitize_payload
     from store import TossRuntimeStore
     from structured_analysis import extract_structured_analysis
@@ -63,6 +65,7 @@ def main(argv=None):
         paper_feedback = store.paper_feedback_summary()
         return_feedback = store.return_feedback_by_symbol()
         previous_context = build_previous_analysis_context(store.latest_structured_by_symbol(symbols))
+        relationship_evidence = build_relationship_evidence(store, us_symbols=symbols)
     finally:
         store.close()
 
@@ -75,6 +78,7 @@ def main(argv=None):
     )
     evidence["paper_feedback_summary"] = paper_feedback
     evidence["return_feedback_by_symbol"] = return_feedback
+    evidence["market_relationship"] = relationship_evidence
     evidence = attach_feedback_adjustments(evidence, paper_feedback)
     evidence = attach_previous_analysis_context(evidence, previous_context)
     if not evidence.get("safe_for_analysis"):

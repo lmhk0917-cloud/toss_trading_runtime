@@ -8,9 +8,11 @@ import sys
 from datetime import datetime
 
 try:
+    from .relationship_analysis import build_relationship_evidence
     from . import config
     from .store import TossRuntimeStore
 except ImportError:  # pragma: no cover
+    from relationship_analysis import build_relationship_evidence
     import config
     from store import TossRuntimeStore
 
@@ -95,7 +97,10 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
             },
             "minute_series": _minute_close_series(store, symbol),
         })
-    latest_gpt = _latest_gpt_analysis(store)
+    latest_gpt = _latest_gpt_analysis(store, mode="focused_watchlist")
+    domestic_gpt = _latest_gpt_analysis(store, mode="domestic_kr")
+    domestic_rows = _domestic_with_analysis(store, store.domestic_snapshot(codes=domestic_symbols))
+    relationship = build_relationship_evidence(store, domestic_codes=domestic_symbols, us_symbols=symbols)
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "db_path": os.path.abspath(store.db_path),
@@ -109,7 +114,10 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
         "score_history": _score_history(store, symbols=symbols),
         "latest_gpt": latest_gpt,
         "gpt_sections": _gpt_sections_by_symbol((latest_gpt or {}).get("gpt_analysis"), symbols),
-        "domestic": store.domestic_snapshot(codes=domestic_symbols),
+        "domestic": domestic_rows,
+        "relationship": relationship,
+        "domestic_latest_gpt": domestic_gpt,
+        "domestic_gpt_sections": _gpt_sections_by_symbol((domestic_gpt or {}).get("gpt_analysis"), domestic_symbols or []),
         "latest_context": _latest_context(store),
         "latest_analysis": summary.get("latest_analysis"),
     }
@@ -124,7 +132,9 @@ def render_dashboard_html(snapshot):
     event_rows = "\n".join(_event_row(row) for row in snapshot.get("recent_events") or [])
     feedback_rows = "\n".join(_feedback_row(row) for row in snapshot.get("paper_feedback") or [])
     domestic_rows = "\n".join(_domestic_row(row) for row in snapshot.get("domestic") or [])
+    relationship_rows = "\n".join(_relationship_row(row) for row in ((snapshot.get("relationship") or {}).get("pairs") or []))
     context = snapshot.get("latest_context") or {}
+    relationship = snapshot.get("relationship") or {}
     table_cells = "\n".join(
         "<tr><td>{}</td><td>{}</td></tr>".format(_e(key), _e(value))
         for key, value in sorted(tables.items())
@@ -277,6 +287,19 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     </table>
   </section>
   <section>
+    <h2>KR-US Relationship</h2>
+    <div class="metrics">
+      <div class="metric"><div class="label">Regime</div><div class="value">{relationship_regime}</div></div>
+      <div class="metric"><div class="label">Paired Samples</div><div class="value">{relationship_samples}</div></div>
+      <div class="metric"><div class="label">Warning</div><div class="value">{relationship_warning}</div></div>
+      <div class="metric"><div class="label">Proxy</div><div class="value">{relationship_proxy}</div></div>
+    </div>
+    <table>
+      <thead><tr><th>KR</th><th>US</th><th>Lag</th><th class="num">Samples</th><th class="num">Corr</th><th>Regime</th><th class="num">KR Avg</th><th class="num">US Avg</th></tr></thead>
+      <tbody>{relationship_rows}</tbody>
+    </table>
+  </section>
+  <section>
     <h2>Latest Context</h2>
     <table><tbody>
       <tr><td>Collected</td><td>{context_time}</td></tr>
@@ -304,6 +327,11 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
         event_rows=event_rows,
         feedback_rows=feedback_rows,
         domestic_rows=domestic_rows,
+        relationship_regime=_e(relationship.get("relationship_regime") or "insufficient_evidence"),
+        relationship_samples=_e(((relationship.get("data_quality") or {}).get("paired_observation_count")) or 0),
+        relationship_warning=_e(((relationship.get("data_quality") or {}).get("warning")) or "none"),
+        relationship_proxy=_e("yes" if ((relationship.get("data_quality") or {}).get("uses_proxy_alignment")) else "no"),
+        relationship_rows=relationship_rows,
         context_time=_e(context.get("collected_at") or ""),
         context_fx=_fmt(context.get("fx_rate"), decimals=4),
         context_us=_e(context.get("us_session") or ""),
@@ -409,6 +437,21 @@ def _domestic_row(row):
         r60=_fmt((horizons.get(60) or {}).get("avg_return_pct"), decimals=4, signed=True),
         win=_fmt(win_rate, decimals=4),
         signal=_e(signal_text),
+    )
+
+
+def _relationship_row(row):
+    return """<tr><td>{kr}</td><td>{us}</td><td>{lag}</td><td class="num">{samples}</td><td class="num">{corr}</td><td>{regime}</td><td class="num {kr_class}">{kr_avg}</td><td class="num {us_class}">{us_avg}</td></tr>""".format(
+        kr=_e(row.get("source_symbol")),
+        us=_e(row.get("target_symbol")),
+        lag=_e(row.get("lag_label")),
+        samples=_e(row.get("paired_sample_count")),
+        corr=_fmt(row.get("correlation"), decimals=4),
+        regime=_e(row.get("relationship_regime")),
+        kr_class=_num_class(row.get("avg_source_return_pct")),
+        kr_avg=_fmt(row.get("avg_source_return_pct"), decimals=4, signed=True),
+        us_class=_num_class(row.get("avg_target_return_pct")),
+        us_avg=_fmt(row.get("avg_target_return_pct"), decimals=4, signed=True),
     )
 
 
@@ -542,13 +585,45 @@ def _minute_close_series(store, symbol, limit=120):
     return series
 
 
-def _latest_gpt_analysis(store):
+def _domestic_with_analysis(store, rows):
+    codes = [row.get("code") for row in rows or []]
+    structured = _latest_structured_by_mode(store, codes, mode="domestic_kr")
+    result = []
+    for row in rows or []:
+        item = dict(row)
+        item["analysis"] = structured.get(row.get("code")) or None
+        result.append(item)
+    return result
+
+
+def _latest_structured_by_mode(store, symbols, mode):
+    result = {}
+    for symbol in symbols or []:
+        row = store.conn.execute("""
+            SELECT structured_analysis.*, analysis_results.analyzed_at
+            FROM structured_analysis
+            LEFT JOIN analysis_results ON analysis_results.id = structured_analysis.analysis_id
+            WHERE structured_analysis.symbol = ? AND analysis_results.mode = ?
+            ORDER BY structured_analysis.analysis_id DESC, structured_analysis.id DESC
+            LIMIT 1
+        """, (str(symbol), mode)).fetchone()
+        result[str(symbol)] = dict(row) if row else None
+    return result
+
+
+def _latest_gpt_analysis(store, mode=None):
+    where = ""
+    params = []
+    if mode:
+        where = "WHERE mode = ?"
+        params.append(mode)
     row = store.conn.execute("""
         SELECT id, analyzed_at, symbols, model, total_tokens, gpt_analysis
         FROM analysis_results
+        {where}
         ORDER BY id DESC
         LIMIT 1
-    """).fetchone()
+    """.format(where=where), params).fetchone()
     return dict(row) if row else None
 
 

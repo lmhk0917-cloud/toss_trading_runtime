@@ -155,6 +155,20 @@ class TossRuntimeStore(object):
                 UNIQUE(source, code)
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_relationship_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at TEXT NOT NULL,
+                source_market TEXT NOT NULL,
+                source_symbol TEXT NOT NULL,
+                target_market TEXT NOT NULL,
+                target_symbol TEXT NOT NULL,
+                source_return_pct REAL,
+                target_return_pct REAL,
+                lag_label TEXT NOT NULL,
+                payload_json TEXT
+            )
+        """)
         self._ensure_column("paper_trade_candidates", "max_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "min_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "outcome", "TEXT")
@@ -165,6 +179,7 @@ class TossRuntimeStore(object):
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_pair_time ON market_relationship_observations(source_symbol, target_symbol, lag_label, observed_at)")
         self.conn.commit()
 
     def _ensure_column(self, table, column, column_type):
@@ -494,6 +509,7 @@ class TossRuntimeStore(object):
             "structured_analysis",
             "domestic_feedback_summary",
             "domestic_signal_summary",
+            "market_relationship_observations",
         ]:
             tables[table] = self.count_rows(table)
         latest_analysis = self.conn.execute("""
@@ -641,6 +657,52 @@ class TossRuntimeStore(object):
                 "signal": dict(signal) if signal else None,
             })
         return result
+
+    def save_relationship_observations(self, rows):
+        count = 0
+        for row in rows or []:
+            self.conn.execute("""
+                INSERT INTO market_relationship_observations (
+                    observed_at, source_market, source_symbol, target_market,
+                    target_symbol, source_return_pct, target_return_pct,
+                    lag_label, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row.get("observed_at") or _now(),
+                row.get("source_market") or "KR",
+                str(row.get("source_symbol") or "").strip(),
+                row.get("target_market") or "US",
+                str(row.get("target_symbol") or "").strip().upper(),
+                _to_float(row.get("source_return_pct")),
+                _to_float(row.get("target_return_pct")),
+                row.get("lag_label") or "same_session",
+                _json(row),
+            ))
+            count += 1
+        self.conn.commit()
+        return count
+
+    def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=500):
+        domestic_codes = [str(item).strip() for item in domestic_codes or [] if str(item).strip()]
+        us_symbols = [str(item).strip().upper() for item in us_symbols or [] if str(item).strip()]
+        clauses = []
+        params = []
+        if domestic_codes:
+            clauses.append("source_symbol IN ({})".format(",".join("?" for _ in domestic_codes)))
+            params.extend(domestic_codes)
+        if us_symbols:
+            clauses.append("target_symbol IN ({})".format(",".join("?" for _ in us_symbols)))
+            params.extend(us_symbols)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(int(limit))
+        rows = self.conn.execute("""
+            SELECT *
+            FROM market_relationship_observations
+            {where}
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+        """.format(where=where), params).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
     def count_rows(self, table):
         row = self.conn.execute("SELECT COUNT(1) AS count FROM {}".format(table)).fetchone()
