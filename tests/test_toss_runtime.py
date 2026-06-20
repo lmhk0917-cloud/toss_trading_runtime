@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime
@@ -620,6 +621,9 @@ def test_dashboard_snapshot_and_html_render():
         assert "Toss Focused Dashboard" in html
         assert "Domestic Market" in html
         assert "KR-US Relationship" in html
+        assert "Beta" in html
+        assert "Hit Up" in html
+        assert "Reversal" in html
         assert "AAPL" in html
         formatted = format_summary_text("AAPL **EVIDENCE:** - one - two **NEXT CHECKS:** done")
         assert "\n\nEVIDENCE:" in formatted
@@ -649,7 +653,7 @@ def test_relationship_evidence_blocks_correlation_claim_without_pairs():
             "best_path_return_pct": 1.2,
             "worst_path_return_pct": -0.7,
         }])
-        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=3)
+        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=3, kiwoom_db_path="missing.db")
         assert evidence["relationship_regime"] == "insufficient_evidence"
         assert evidence["data_quality"]["warning"]
         assert evidence["data_quality"]["uses_proxy_alignment"]
@@ -675,14 +679,73 @@ def test_relationship_evidence_detects_strong_paired_relationship():
                 "lag_label": "kr_close_to_us_regular",
             })
         store.save_relationship_observations(rows)
-        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=5)
+        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=5, kiwoom_db_path="missing.db")
         assert evidence["relationship_regime"] == "strong"
         assert evidence["data_quality"]["warning"] is None
         assert evidence["pairs"][0]["paired_sample_count"] == 5
         assert evidence["pairs"][0]["correlation"] >= 0.65
+        assert evidence["pairs"][0]["regression"]["beta"] == 2.0
+        assert evidence["pairs"][0]["regression"]["r_squared"] == 1.0
+        assert evidence["pairs"][0]["directional_stats"]["hit_ratio_up"]["hit_ratio"] == 1.0
+        assert evidence["pairs"][0]["directional_stats"]["hit_ratio_down"]["hit_ratio"] == 1.0
+        assert evidence["pairs"][0]["lead_score"] is not None
+        assert evidence["pairs"][0]["gap_effect"]["status"] == "not_available"
     finally:
         store.close()
         os.unlink(tmp.name)
+
+
+def test_relationship_evidence_reads_kiwoom_daily_gap_returns():
+    runtime_tmp = tempfile.NamedTemporaryFile(delete=False)
+    runtime_tmp.close()
+    kiwoom_tmp = tempfile.NamedTemporaryFile(delete=False)
+    kiwoom_tmp.close()
+    store = TossRuntimeStore(runtime_tmp.name)
+    conn = None
+    try:
+        conn = sqlite3.connect(kiwoom_tmp.name)
+        conn.execute("""
+            CREATE TABLE ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                price INTEGER,
+                open_price INTEGER,
+                received_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("INSERT INTO ticks (code, price, open_price, received_at) VALUES ('005930', 100, 100, '2026-06-01 15:30:00')")
+        conn.execute("INSERT INTO ticks (code, price, open_price, received_at) VALUES ('005930', 105, 105, '2026-06-02 09:00:00')")
+        conn.execute("INSERT INTO ticks (code, price, open_price, received_at) VALUES ('005930', 103, 105, '2026-06-02 15:30:00')")
+        conn.commit()
+        conn.close()
+        conn = None
+        store.save_relationship_observations([{
+            "observed_at": "2026-06-02 15:40:00",
+            "source_symbol": "005930",
+            "target_symbol": "NVDA",
+            "source_return_pct": 3.0,
+            "target_return_pct": 5.0,
+            "lag_label": "us_t_to_kr_t_plus_1",
+        }])
+        evidence = build_relationship_evidence(
+            store,
+            domestic_codes=["005930"],
+            us_symbols=["NVDA"],
+            min_samples=1,
+            kiwoom_db_path=kiwoom_tmp.name,
+        )
+        gap = evidence["pairs"][0]["gap_effect"]
+        assert gap["status"] == "ok"
+        assert gap["matched_count"] == 1
+        assert gap["avg_open_return_pct"] == 5.0
+        assert gap["avg_close_return_pct"] == 3.0
+        assert gap["reversal_count"] == 1
+    finally:
+        if conn is not None:
+            conn.close()
+        store.close()
+        os.unlink(runtime_tmp.name)
+        os.unlink(kiwoom_tmp.name)
 
 
 def test_dashboard_window_symbol_persistence():
@@ -843,6 +906,7 @@ if __name__ == "__main__":
         test_dashboard_snapshot_and_html_render,
         test_relationship_evidence_blocks_correlation_claim_without_pairs,
         test_relationship_evidence_detects_strong_paired_relationship,
+        test_relationship_evidence_reads_kiwoom_daily_gap_returns,
         test_dashboard_window_symbol_persistence,
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,

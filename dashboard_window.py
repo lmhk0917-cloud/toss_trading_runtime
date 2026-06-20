@@ -20,26 +20,16 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_SYMBOLS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "reports",
-    "dashboard_symbols.json",
+    "watchlists",
+    "us_focus.json",
 )
 DEFAULT_DOMESTIC_SYMBOLS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "reports",
-    "dashboard_domestic_symbols.json",
-)
-DEFAULT_US_WATCHLIST_EXPORT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "reports",
     "watchlists",
-    "us_focus_watchlist.json",
+    "domestic_kr.json",
 )
-DEFAULT_DOMESTIC_WATCHLIST_EXPORT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "reports",
-    "watchlists",
-    "domestic_kr_watchlist.json",
-)
+DEFAULT_US_WATCHLIST_EXPORT_PATH = DEFAULT_SYMBOLS_PATH
+DEFAULT_DOMESTIC_WATCHLIST_EXPORT_PATH = DEFAULT_DOMESTIC_SYMBOLS_PATH
 
 
 class TossDashboardWindow(object):
@@ -101,11 +91,13 @@ class TossDashboardWindow(object):
         self.symbols_entry = ttk.Entry(toolbar, textvariable=self.symbols_var, width=34)
         self.symbols_entry.pack(side="left")
         ttk.Button(toolbar, text="Apply", command=self.apply_symbols).pack(side="left", padx=(4, 0))
+        ttk.Button(toolbar, text="Reload", command=self.reload_symbols).pack(side="left", padx=(4, 0))
         ttk.Label(toolbar, text="KR").pack(side="left", padx=(12, 4))
         self.domestic_symbols_var = tk.StringVar(value=",".join(self.domestic_symbols))
         self.domestic_symbols_entry = ttk.Entry(toolbar, textvariable=self.domestic_symbols_var, width=22)
         self.domestic_symbols_entry.pack(side="left")
         ttk.Button(toolbar, text="Apply KR", command=self.apply_domestic_symbols).pack(side="left", padx=(4, 0))
+        ttk.Button(toolbar, text="Reload KR", command=self.reload_domestic_symbols).pack(side="left", padx=(4, 0))
         ttk.Button(toolbar, text="Quit", command=self.root.destroy).pack(side="right")
         self.status_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self.status_var).pack(side="left", padx=(12, 0))
@@ -458,6 +450,14 @@ class TossDashboardWindow(object):
         self.symbol_tree.selection_remove(*self.symbol_tree.selection())
         self.refresh()
 
+    def reload_symbols(self):
+        symbols = load_symbols(self.symbols_path) or list(config.FOCUSED_NASDAQ_WATCHLIST)
+        self.symbols = symbols
+        self.symbols_var.set(",".join(symbols))
+        self.status_var.set("Reloaded US symbols: {}".format(",".join(symbols)))
+        self.symbol_tree.selection_remove(*self.symbol_tree.selection())
+        self.refresh()
+
     def apply_domestic_symbols(self):
         symbols = [item.strip() for item in self.domestic_symbols_var.get().split(",") if item.strip()]
         if not symbols:
@@ -467,6 +467,13 @@ class TossDashboardWindow(object):
         save_symbols(symbols, self.domestic_symbols_path)
         export_path = save_watchlist_file(symbols, self.domestic_watchlist_export_path, market="KR", label="Domestic KR")
         self.status_var.set("Saved KR symbols: {} -> {}".format(",".join(symbols), export_path))
+        self.refresh()
+
+    def reload_domestic_symbols(self):
+        symbols = load_symbols(self.domestic_symbols_path) or ["005930", "000660"]
+        self.domestic_symbols = symbols
+        self.domestic_symbols_var.set(",".join(symbols))
+        self.status_var.set("Reloaded KR symbols: {}".format(",".join(symbols)))
         self.refresh()
 
     def _show_gpt_for(self, symbol):
@@ -727,13 +734,22 @@ class TossDashboardWindow(object):
         if pairs:
             lines.append("  pairs:")
             for item in pairs[:8]:
+                regression = item.get("regression") or {}
+                directional = item.get("directional_stats") or {}
+                gap = item.get("gap_effect") or {}
                 lines.append(
-                    "    {kr}->{us} lag={lag} n={samples} corr={corr} regime={regime}".format(
+                    "    {kr}->{us} lag={lag} n={samples} corr={corr} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} gap={gap_status} reversal={reversal} regime={regime}".format(
                         kr=item.get("source_symbol") or "-",
                         us=item.get("target_symbol") or "-",
                         lag=item.get("lag_label") or "-",
                         samples=item.get("paired_sample_count") or 0,
                         corr=_fmt(item.get("correlation"), 4, signed=True),
+                        beta=_fmt(regression.get("beta"), 4, signed=True),
+                        hit_up=_fmt(((directional.get("hit_ratio_up") or {}).get("hit_ratio")), 4),
+                        hit_down=_fmt(((directional.get("hit_ratio_down") or {}).get("hit_ratio")), 4),
+                        lead=_fmt(item.get("lead_score"), 2),
+                        gap_status=gap.get("status") or "-",
+                        reversal=_fmt(gap.get("reversal_rate"), 4),
                         regime=item.get("relationship_regime") or "-",
                     )
                 )
@@ -763,13 +779,22 @@ class TossDashboardWindow(object):
         ]
         if pairs:
             for item in pairs[:6]:
+                regression = item.get("regression") or {}
+                directional = item.get("directional_stats") or {}
+                gap = item.get("gap_effect") or {}
                 lines.append(
-                    "  {kr}->{us} lag={lag} n={samples} corr={corr} regime={regime}".format(
+                    "  {kr}->{us} lag={lag} n={samples} corr={corr} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} gap={gap_status} reversal={reversal} regime={regime}".format(
                         kr=item.get("source_symbol") or "-",
                         us=item.get("target_symbol") or "-",
                         lag=item.get("lag_label") or "-",
                         samples=item.get("paired_sample_count") or 0,
                         corr=_fmt(item.get("correlation"), 4, signed=True),
+                        beta=_fmt(regression.get("beta"), 4, signed=True),
+                        hit_up=_fmt(((directional.get("hit_ratio_up") or {}).get("hit_ratio")), 4),
+                        hit_down=_fmt(((directional.get("hit_ratio_down") or {}).get("hit_ratio")), 4),
+                        lead=_fmt(item.get("lead_score"), 2),
+                        gap_status=gap.get("status") or "-",
+                        reversal=_fmt(gap.get("reversal_rate"), 4),
                         regime=item.get("relationship_regime") or "-",
                     )
                 )

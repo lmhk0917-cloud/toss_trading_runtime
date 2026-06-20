@@ -295,7 +295,7 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
       <div class="metric"><div class="label">Proxy</div><div class="value">{relationship_proxy}</div></div>
     </div>
     <table>
-      <thead><tr><th>KR</th><th>US</th><th>Lag</th><th class="num">Samples</th><th class="num">Corr</th><th>Regime</th><th class="num">KR Avg</th><th class="num">US Avg</th></tr></thead>
+      <thead><tr><th>KR</th><th>US</th><th>Lag</th><th class="num">Samples</th><th class="num">Corr</th><th class="num">Beta</th><th class="num">R2</th><th class="num">Hit Up</th><th class="num">Hit Down</th><th class="num">Lead</th><th>Gap</th><th class="num">Reversal</th><th>Regime</th></tr></thead>
       <tbody>{relationship_rows}</tbody>
     </table>
   </section>
@@ -441,17 +441,25 @@ def _domestic_row(row):
 
 
 def _relationship_row(row):
-    return """<tr><td>{kr}</td><td>{us}</td><td>{lag}</td><td class="num">{samples}</td><td class="num">{corr}</td><td>{regime}</td><td class="num {kr_class}">{kr_avg}</td><td class="num {us_class}">{us_avg}</td></tr>""".format(
+    regression = row.get("regression") or {}
+    directional = row.get("directional_stats") or {}
+    gap = row.get("gap_effect") or {}
+    hit_up = (directional.get("hit_ratio_up") or {}).get("hit_ratio")
+    hit_down = (directional.get("hit_ratio_down") or {}).get("hit_ratio")
+    return """<tr><td>{kr}</td><td>{us}</td><td>{lag}</td><td class="num">{samples}</td><td class="num">{corr}</td><td class="num">{beta}</td><td class="num">{r2}</td><td class="num">{hit_up}</td><td class="num">{hit_down}</td><td class="num">{lead}</td><td>{gap_status}</td><td class="num">{reversal}</td><td>{regime}</td></tr>""".format(
         kr=_e(row.get("source_symbol")),
         us=_e(row.get("target_symbol")),
         lag=_e(row.get("lag_label")),
         samples=_e(row.get("paired_sample_count")),
         corr=_fmt(row.get("correlation"), decimals=4),
+        beta=_fmt(regression.get("beta"), decimals=4, signed=True),
+        r2=_fmt(regression.get("r_squared"), decimals=4),
+        hit_up=_fmt(hit_up, decimals=4),
+        hit_down=_fmt(hit_down, decimals=4),
+        lead=_fmt(row.get("lead_score"), decimals=2),
+        gap_status=_e(gap.get("status") or "-"),
+        reversal=_fmt(gap.get("reversal_rate"), decimals=4),
         regime=_e(row.get("relationship_regime")),
-        kr_class=_num_class(row.get("avg_source_return_pct")),
-        kr_avg=_fmt(row.get("avg_source_return_pct"), decimals=4, signed=True),
-        us_class=_num_class(row.get("avg_target_return_pct")),
-        us_avg=_fmt(row.get("avg_target_return_pct"), decimals=4, signed=True),
     )
 
 

@@ -52,6 +52,11 @@ FOCUSED_NASDAQ_WATCHLIST = [
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
 
+KIWOOM_PERSONAL_DB_PATH = os.environ.get(
+    "KIWOOM_PERSONAL_DB_PATH",
+    r"C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1\data\ticks.db",
+)
+
 READ_ONLY_ENDPOINTS = set([
     "/api/v1/accounts",
     "/api/v1/prices",
