@@ -33,6 +33,7 @@ def build_relationship_evidence(
     data_quality = {
         "min_samples": int(min_samples),
         "paired_observation_count": len(observations),
+        "daily_historical_observation_count": _count_daily_historical(observations),
         "kiwoom_daily_return_count": sum(len(value) for value in kiwoom_daily.values()),
         "has_paired_observations": bool(pair_results),
         "has_valid_pair_results": any(
@@ -41,7 +42,13 @@ def build_relationship_evidence(
         ),
         "uses_proxy_alignment": not bool(pair_results),
         "warning": None,
+        "resolution_warning": None,
     }
+    if data_quality["daily_historical_observation_count"]:
+        data_quality["resolution_warning"] = (
+            "Some paired observations are daily historical close-to-close rows. "
+            "Use them for long-horizon relationship checks only, not minute/tick timing."
+        )
     if not data_quality["has_valid_pair_results"]:
         data_quality["warning"] = "insufficient paired KR-US observations; do not claim correlation strength"
     regime = _overall_regime(pair_results)
@@ -56,6 +63,7 @@ def build_relationship_evidence(
         "proxy_alignment": proxy,
         "interpretation_rules": [
             "Only pair results with paired_sample_count >= min_samples may be described as correlation evidence.",
+            "Daily historical observations are not minute or tick evidence and must not be used for intraday timing.",
             "Proxy alignment is directional context, not correlation.",
             "When data_quality.warning is present, GPT must state that relationship strength is not proven.",
         ],
@@ -75,6 +83,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
     results = []
     for (source_symbol, target_symbol, lag_label), rows in sorted(grouped.items()):
         source_values, target_values, direction = _analysis_return_vectors(rows)
+        resolution = _resolution_summary(rows)
         corr = _pearson(source_values, target_values)
         regression = _regression_beta(source_values, target_values)
         directional = _directional_stats(source_values, target_values)
@@ -85,6 +94,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
             "source_symbol": source_symbol,
             "target_symbol": target_symbol,
             "analysis_direction": direction,
+            "resolution": resolution,
             "lag_label": lag_label,
             "paired_sample_count": len(rows),
             "correlation": corr,
@@ -146,6 +156,33 @@ def _analysis_return_vectors(rows):
             source_values.append(_to_float(row.get("source_return_pct")))
             target_values.append(_to_float(row.get("target_return_pct")))
     return source_values, target_values, direction
+
+
+def _count_daily_historical(rows):
+    return sum(1 for row in rows if _is_daily_historical(row))
+
+
+def _is_daily_historical(row):
+    payload = _parse_json(row.get("payload_json"))
+    return (
+        payload.get("observation_timeframe") == "1d"
+        or payload.get("resolution") == "1d"
+        or payload.get("data_source") == "yahoo_history_csv"
+    )
+
+
+def _resolution_summary(rows):
+    daily_count = _count_daily_historical(rows)
+    payload = _parse_json((rows[-1] if rows else {}).get("payload_json"))
+    return {
+        "timeframe": payload.get("observation_timeframe") or payload.get("resolution") or "unknown",
+        "granularity": payload.get("observation_granularity") or "unknown",
+        "daily_historical_count": daily_count,
+        "intraday_count": max(0, len(rows) - daily_count),
+        "intraday_source": bool(payload.get("intraday_source")) if payload else None,
+        "tick_source": bool(payload.get("tick_source")) if payload else None,
+        "warning": payload.get("resolution_warning") if daily_count else None,
+    }
 
 
 def _overall_regime(pair_results):

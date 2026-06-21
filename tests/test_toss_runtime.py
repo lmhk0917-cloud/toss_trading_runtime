@@ -765,6 +765,11 @@ def test_historical_relationship_payload_uses_us_driver_kr_response():
                 "driver_return_pct": 1.0,
                 "response_symbol": "005930",
                 "response_return_pct": 2.0,
+                "observation_timeframe": "1d",
+                "observation_granularity": "daily_close_to_close",
+                "intraday_source": False,
+                "tick_source": False,
+                "resolution_warning": "Daily historical close-to-close data; do not treat as minute or tick evidence.",
             },
             {
                 "observed_at": "2026-06-03 15:40:00",
@@ -777,12 +782,22 @@ def test_historical_relationship_payload_uses_us_driver_kr_response():
                 "driver_return_pct": 2.0,
                 "response_symbol": "005930",
                 "response_return_pct": 4.0,
+                "observation_timeframe": "1d",
+                "observation_granularity": "daily_close_to_close",
+                "intraday_source": False,
+                "tick_source": False,
+                "resolution_warning": "Daily historical close-to-close data; do not treat as minute or tick evidence.",
             },
         ])
         evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=2, kiwoom_db_path="missing.db")
         pair = evidence["pairs"][0]
         assert pair["analysis_direction"] == "NVDA_to_005930"
         assert pair["regression"]["beta"] == 2.0
+        assert evidence["data_quality"]["daily_historical_observation_count"] == 2
+        assert evidence["data_quality"]["resolution_warning"]
+        assert pair["resolution"]["timeframe"] == "1d"
+        assert pair["resolution"]["daily_historical_count"] == 2
+        assert pair["resolution"]["intraday_count"] == 0
     finally:
         store.close()
         os.unlink(tmp.name)

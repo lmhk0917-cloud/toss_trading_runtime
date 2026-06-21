@@ -57,3 +57,22 @@ only recent live observations. Example selected outputs:
 - `005930` vs `MU`, `us_t_minus_1_to_kr_t`: sample about `2445`, correlation about `0.3470`, beta about `0.2157`
 
 Use the dashboard `KR-US Relationship` section for the current computed values.
+
+## Shared Daily Package
+
+The collected data can be exported for the other projects with:
+
+```powershell
+C:\Users\lmhk2\anaconda3\python.exe -m toss_trading_runtime.export_historical_market_data
+```
+
+Output:
+
+- `C:\Users\lmhk2\Documents\New project\market_data_exports\shared\historical_market_data_v1.json`
+
+Important resolution rule:
+
+- The shared package is `timeframe=1d`.
+- It sets `intraday_source=false` and `tick_source=false`.
+- Importers must not create synthetic ticks or synthetic minute candles from it.
+- Use it for long-horizon context, daily correlation, and daily lead-lag checks only.

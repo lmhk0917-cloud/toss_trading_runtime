@@ -17,6 +17,8 @@ DEFAULT_CSV_DIR = os.path.join(PROJECT_ROOT, "market_data_exports", "csv")
 DEFAULT_DOMESTIC = ["005930", "000660"]
 DEFAULT_US = ["NVDA", "MU", "QQQ", "SOXX", "AMD", "AVGO", "TSM", "SMH", "SPY"]
 HISTORICAL_LAG_LABELS = ["same_date_us_kr", "us_t_minus_1_to_kr_t"]
+DAILY_HISTORY_SOURCE = "yahoo_history_csv"
+DAILY_HISTORY_TIMEFRAME = "1d"
 
 
 def main(argv=None):
@@ -132,7 +134,22 @@ def row_payload(code, us_symbol, date, driver_return, response_return, lag_label
         "source_return_pct": response_return,
         "target_return_pct": driver_return,
         "lag_label": lag_label,
-        "data_source": "yahoo_history_csv",
+        "data_source": DAILY_HISTORY_SOURCE,
+        "observation_timeframe": DAILY_HISTORY_TIMEFRAME,
+        "observation_granularity": "daily_close_to_close",
+        "intraday_source": False,
+        "tick_source": False,
+        "resolution_warning": "Daily historical close-to-close data; do not treat as minute or tick evidence.",
+        "valid_for": [
+            "long_horizon_correlation",
+            "lead_lag_daily_regression",
+            "historical_context",
+        ],
+        "not_valid_for": [
+            "intraday_entry_timing",
+            "minute_signal_confirmation",
+            "tick_flow_detection",
+        ],
         "driver_market": "US",
         "driver_symbol": us_symbol,
         "driver_date": driver_date_text,
