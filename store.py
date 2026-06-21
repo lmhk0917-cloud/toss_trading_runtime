@@ -682,7 +682,31 @@ class TossRuntimeStore(object):
         self.conn.commit()
         return count
 
-    def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=500):
+    def delete_relationship_observations(self, domestic_codes=None, us_symbols=None, lag_labels=None):
+        domestic_codes = [str(item).strip() for item in domestic_codes or [] if str(item).strip()]
+        us_symbols = [str(item).strip().upper() for item in us_symbols or [] if str(item).strip()]
+        lag_labels = [str(item).strip() for item in lag_labels or [] if str(item).strip()]
+        clauses = []
+        params = []
+        if domestic_codes:
+            clauses.append("source_symbol IN ({})".format(",".join("?" for _ in domestic_codes)))
+            params.extend(domestic_codes)
+        if us_symbols:
+            clauses.append("target_symbol IN ({})".format(",".join("?" for _ in us_symbols)))
+            params.extend(us_symbols)
+        if lag_labels:
+            clauses.append("lag_label IN ({})".format(",".join("?" for _ in lag_labels)))
+            params.extend(lag_labels)
+        if not clauses:
+            return 0
+        cursor = self.conn.execute(
+            "DELETE FROM market_relationship_observations WHERE {}".format(" AND ".join(clauses)),
+            params,
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=100000):
         domestic_codes = [str(item).strip() for item in domestic_codes or [] if str(item).strip()]
         us_symbols = [str(item).strip().upper() for item in us_symbols or [] if str(item).strip()]
         clauses = []

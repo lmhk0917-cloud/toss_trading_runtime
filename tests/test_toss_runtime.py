@@ -748,6 +748,46 @@ def test_relationship_evidence_reads_kiwoom_daily_gap_returns():
         os.unlink(kiwoom_tmp.name)
 
 
+def test_historical_relationship_payload_uses_us_driver_kr_response():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        store.save_relationship_observations([
+            {
+                "observed_at": "2026-06-02 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "NVDA",
+                "source_return_pct": 2.0,
+                "target_return_pct": 1.0,
+                "lag_label": "us_t_minus_1_to_kr_t",
+                "driver_symbol": "NVDA",
+                "driver_return_pct": 1.0,
+                "response_symbol": "005930",
+                "response_return_pct": 2.0,
+            },
+            {
+                "observed_at": "2026-06-03 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "NVDA",
+                "source_return_pct": 4.0,
+                "target_return_pct": 2.0,
+                "lag_label": "us_t_minus_1_to_kr_t",
+                "driver_symbol": "NVDA",
+                "driver_return_pct": 2.0,
+                "response_symbol": "005930",
+                "response_return_pct": 4.0,
+            },
+        ])
+        evidence = build_relationship_evidence(store, domestic_codes=["005930"], us_symbols=["NVDA"], min_samples=2, kiwoom_db_path="missing.db")
+        pair = evidence["pairs"][0]
+        assert pair["analysis_direction"] == "NVDA_to_005930"
+        assert pair["regression"]["beta"] == 2.0
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
 def test_dashboard_window_symbol_persistence():
     tmp = tempfile.NamedTemporaryFile(delete=False)
     tmp.close()
@@ -907,6 +947,7 @@ if __name__ == "__main__":
         test_relationship_evidence_blocks_correlation_claim_without_pairs,
         test_relationship_evidence_detects_strong_paired_relationship,
         test_relationship_evidence_reads_kiwoom_daily_gap_returns,
+        test_historical_relationship_payload_uses_us_driver_kr_response,
         test_dashboard_window_symbol_persistence,
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,

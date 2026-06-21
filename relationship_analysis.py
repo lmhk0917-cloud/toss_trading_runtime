@@ -1,5 +1,6 @@
 """Relationship and lead-lag evidence between KR and US semiconductor themes."""
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -73,8 +74,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
         grouped.setdefault(key, []).append(row)
     results = []
     for (source_symbol, target_symbol, lag_label), rows in sorted(grouped.items()):
-        source_values = [_to_float(row.get("source_return_pct")) for row in rows]
-        target_values = [_to_float(row.get("target_return_pct")) for row in rows]
+        source_values, target_values, direction = _analysis_return_vectors(rows)
         corr = _pearson(source_values, target_values)
         regression = _regression_beta(source_values, target_values)
         directional = _directional_stats(source_values, target_values)
@@ -84,6 +84,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
         results.append({
             "source_symbol": source_symbol,
             "target_symbol": target_symbol,
+            "analysis_direction": direction,
             "lag_label": lag_label,
             "paired_sample_count": len(rows),
             "correlation": corr,
@@ -126,6 +127,25 @@ def _proxy_alignment(domestic_snapshot, us_feedback, domestic_codes, us_symbols)
         "us": us,
         "note": "Directional proxy only; not paired correlation evidence.",
     }
+
+
+def _analysis_return_vectors(rows):
+    source_values = []
+    target_values = []
+    direction = "source_return_to_target_return"
+    for row in rows:
+        payload = _parse_json(row.get("payload_json"))
+        if payload.get("driver_return_pct") is not None and payload.get("response_return_pct") is not None:
+            source_values.append(_to_float(payload.get("driver_return_pct")))
+            target_values.append(_to_float(payload.get("response_return_pct")))
+            direction = "{}_to_{}".format(
+                payload.get("driver_symbol") or "driver",
+                payload.get("response_symbol") or "response",
+            )
+        else:
+            source_values.append(_to_float(row.get("source_return_pct")))
+            target_values.append(_to_float(row.get("target_return_pct")))
+    return source_values, target_values, direction
 
 
 def _overall_regime(pair_results):
@@ -404,6 +424,15 @@ def _to_int(value):
         return int(float(str(value).replace(",", "").strip()))
     except (TypeError, ValueError):
         return 0
+
+
+def _parse_json(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}
 
 
 def _now():
