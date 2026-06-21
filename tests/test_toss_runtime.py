@@ -31,6 +31,8 @@ from toss_trading_runtime.store import TossRuntimeStore
 from toss_trading_runtime.structured_analysis import extract_structured_analysis
 from toss_trading_runtime.supervisor import _summary_payload, _resolve_stop_time
 from toss_trading_runtime.market_session_run import _new_session, _run_stage
+from toss_trading_runtime.tick_analysis import analyze_tick_flow, tick_events_from_analysis
+from toss_trading_runtime.tick_collector import _collect_iteration
 
 
 class FakeResponse(object):
@@ -71,6 +73,21 @@ class FakeOpener(object):
                 {"timestamp": "2026-06-16T22:31:00+09:00", "closePrice": "102", "volume": "200", "currency": "USD"},
                 {"timestamp": "2026-06-16T22:30:00+09:00", "closePrice": "100", "volume": "100", "currency": "USD"},
             ]}})
+        if "/api/v1/trades" in url:
+            return FakeResponse({"result": [
+                {"price": "102.20", "volume": "20", "timestamp": "2026-06-16T22:31:02.000+09:00", "currency": "USD"},
+                {"price": "101.80", "volume": "12", "timestamp": "2026-06-16T22:31:01.000+09:00", "currency": "USD"},
+                {"price": "101.50", "volume": "10", "timestamp": "2026-06-16T22:31:00.000+09:00", "currency": "USD"},
+            ]})
+        if "/api/v1/orderbook" in url:
+            return FakeResponse({"result": {
+                "timestamp": "2026-06-16T22:31:02.000+09:00",
+                "currency": "USD",
+                "bids": [{"price": "102.10", "volume": "300"}],
+                "asks": [{"price": "102.20", "volume": "200"}],
+            }})
+        if "/api/v1/price-limits" in url:
+            return FakeResponse({"result": {"timestamp": "2026-06-16T22:31:02.000+09:00", "upperLimitPrice": None, "lowerLimitPrice": None, "currency": "USD"}})
         if "/api/v1/exchange-rate" in url:
             assert "baseCurrency=USD" in url
             assert "quoteCurrency=KRW" in url
@@ -256,6 +273,27 @@ def test_focused_evidence_collects_minute_and_daily_summaries():
     assert any("interval=1d" in url for url in urls)
 
 
+def test_client_trade_orderbook_and_price_limit_endpoints():
+    opener = FakeOpener()
+    client = TossInvestClient(
+        client_id="client",
+        client_secret="secret",
+        account_seq="123456789",
+        base_url="https://example.test",
+        opener=opener,
+    )
+    trades = client.get_trades("aapl", count=99)
+    orderbook = client.get_orderbook("aapl")
+    limits = client.get_price_limits("aapl")
+    urls = [request.full_url for request in opener.requests]
+    assert trades["result"][0]["price"] == "102.20"
+    assert orderbook["result"]["bids"][0]["price"] == "102.10"
+    assert limits["result"]["currency"] == "USD"
+    assert any("/api/v1/trades?symbol=AAPL&count=50" in url for url in urls)
+    assert any("/api/v1/orderbook?symbol=AAPL" in url for url in urls)
+    assert any("/api/v1/price-limits?symbol=AAPL" in url for url in urls)
+
+
 def test_focused_evidence_allows_noncritical_calendar_gap():
     class CalendarGapOpener(FakeOpener):
         def __call__(self, request, timeout=20):
@@ -353,6 +391,69 @@ def test_events_and_store_persist_focused_evidence():
         assert latest["AAPL"]["final_decision"] == "WATCH"
         summary = store.operational_summary()
         assert summary["tables"]["price_snapshots"] == 1
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_trade_ticks_orderbook_analysis_and_collector_persist():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        trades_payload = {"result": [
+            {"price": "102.20", "volume": "20", "timestamp": "2026-06-16T22:31:02.000+09:00", "currency": "USD"},
+            {"price": "101.80", "volume": "12", "timestamp": "2026-06-16T22:31:01.000+09:00", "currency": "USD"},
+            {"price": "101.50", "volume": "10", "timestamp": "2026-06-16T22:31:00.000+09:00", "currency": "USD"},
+        ]}
+        orderbook_payload = {"result": {
+            "timestamp": "2026-06-16T22:31:02.000+09:00",
+            "currency": "USD",
+            "bids": [{"price": "102.10", "volume": "300"}],
+            "asks": [{"price": "102.20", "volume": "200"}],
+        }}
+        assert store.save_trade_ticks("AAPL", trades_payload, collected_at="2026-06-16 22:31:03.000000") == 3
+        assert store.save_trade_ticks("AAPL", trades_payload, collected_at="2026-06-16 22:31:04.000000") == 0
+        assert store.save_orderbook_snapshot("AAPL", orderbook_payload, collected_at="2026-06-16 22:31:03.000000") == 1
+        analysis = analyze_tick_flow("AAPL", trades_payload["result"], orderbook_payload["result"], analyzed_at="2026-06-16 22:31:03.000000")
+        assert analysis["signal"] in ("TICK_MOMENTUM_UP", "ORDERBOOK_BID_IMBALANCE")
+        assert analysis["trade_count"] == 3
+        store.save_tick_analysis(analysis)
+        events = tick_events_from_analysis(analysis)
+        for event in events:
+            store.save_event(event)
+        latest = store.latest_tick_analysis(["AAPL"])
+        assert latest["AAPL"]["trade_count"] == 3
+        assert store.count_rows("trade_ticks") == 3
+        assert store.count_rows("orderbook_snapshots") == 1
+        assert store.count_rows("tick_analysis_snapshots") == 1
+        assert store.operational_summary()["tables"]["trade_ticks"] == 3
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_tick_collector_iteration_uses_read_only_tick_endpoints():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    opener = FakeOpener()
+    client = TossInvestClient(
+        client_id="client",
+        client_secret="secret",
+        account_seq="123456789",
+        base_url="https://example.test",
+        opener=opener,
+    )
+    store = TossRuntimeStore(tmp.name)
+    try:
+        result = _collect_iteration(client, store, ["AAPL"], trade_count=5)
+        urls = [request.full_url for request in opener.requests]
+        assert result["trade_rows_inserted"] == 3
+        assert result["orderbook_rows_inserted"] == 1
+        assert result["analysis_rows_inserted"] == 1
+        assert any("/api/v1/trades" in url for url in urls)
+        assert any("/api/v1/orderbook" in url for url in urls)
+        assert not any("/api/v1/orders" in url for url in urls)
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -623,7 +724,8 @@ def test_dashboard_snapshot_and_html_render():
         assert "KR-US Relationship" in html
         assert "Beta" in html
         assert "Hit Up" in html
-        assert "Reversal" in html
+        assert "Stability" in html
+        assert "3M" in html
         assert "AAPL" in html
         formatted = format_summary_text("AAPL **EVIDENCE:** - one - two **NEXT CHECKS:** done")
         assert "\n\nEVIDENCE:" in formatted
@@ -798,6 +900,8 @@ def test_historical_relationship_payload_uses_us_driver_kr_response():
         assert pair["resolution"]["timeframe"] == "1d"
         assert pair["resolution"]["daily_historical_count"] == 2
         assert pair["resolution"]["intraday_count"] == 0
+        assert pair["rolling_correlation"]["windows"]["10y"]["correlation"] == 1.0
+        assert pair["rolling_correlation"]["stability"] in ("insufficient_window_evidence", "stable")
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -950,9 +1054,12 @@ if __name__ == "__main__":
         test_us_session_infers_kst_overnight_regular_market,
         test_score_symbol_ranks_momentum_and_volume,
         test_focused_evidence_collects_minute_and_daily_summaries,
+        test_client_trade_orderbook_and_price_limit_endpoints,
         test_focused_evidence_allows_noncritical_calendar_gap,
         test_summarize_candles_returns_personal_style_inputs,
         test_events_and_store_persist_focused_evidence,
+        test_trade_ticks_orderbook_analysis_and_collector_persist,
+        test_tick_collector_iteration_uses_read_only_tick_endpoints,
         test_feedback_adjustments_attach_to_evidence,
         test_previous_analysis_context_and_comparison,
         test_structured_analysis_splits_markdown_symbol_sections,

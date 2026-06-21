@@ -84,6 +84,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
     for (source_symbol, target_symbol, lag_label), rows in sorted(grouped.items()):
         source_values, target_values, direction = _analysis_return_vectors(rows)
         resolution = _resolution_summary(rows)
+        rolling = _rolling_correlation(rows)
         corr = _pearson(source_values, target_values)
         regression = _regression_beta(source_values, target_values)
         directional = _directional_stats(source_values, target_values)
@@ -95,6 +96,7 @@ def _pair_results(observations, min_samples, kiwoom_daily=None):
             "target_symbol": target_symbol,
             "analysis_direction": direction,
             "resolution": resolution,
+            "rolling_correlation": rolling,
             "lag_label": lag_label,
             "paired_sample_count": len(rows),
             "correlation": corr,
@@ -158,6 +160,74 @@ def _analysis_return_vectors(rows):
     return source_values, target_values, direction
 
 
+def _rolling_correlation(rows):
+    dated = []
+    for row in rows:
+        observed = _parse_date(row.get("observed_at"))
+        if observed is None:
+            continue
+        source_values, target_values, _direction = _analysis_return_vectors([row])
+        if not source_values or not target_values:
+            continue
+        dated.append((observed, source_values[0], target_values[0]))
+    if not dated:
+        return {
+            "warning": "No dated observations available for rolling correlation.",
+            "windows": {},
+        }
+    latest = max(item[0] for item in dated)
+    windows = {}
+    for label, days in [
+        ("3m", 92),
+        ("6m", 183),
+        ("1y", 366),
+        ("3y", 366 * 3),
+        ("10y", 366 * 10),
+    ]:
+        cutoff = latest.toordinal() - days
+        sample = [(x, y) for observed, x, y in dated if observed.toordinal() >= cutoff]
+        left = [x for x, _y in sample]
+        right = [y for _x, y in sample]
+        corr = _pearson(left, right)
+        windows[label] = {
+            "sample_count": len(sample),
+            "correlation": corr,
+            "regime": _regime(corr, len(sample), min_samples=20),
+        }
+    return {
+        "latest_observed_date": latest.date().isoformat(),
+        "windows": windows,
+        "stability": _correlation_stability(windows),
+        "warning": _rolling_warning(windows),
+    }
+
+
+def _correlation_stability(windows):
+    values = [
+        item.get("correlation")
+        for item in windows.values()
+        if item.get("sample_count", 0) >= 20 and item.get("correlation") is not None
+    ]
+    if len(values) < 2:
+        return "insufficient_window_evidence"
+    signs = set(1 if value > 0 else -1 if value < 0 else 0 for value in values)
+    spread = max(values) - min(values)
+    if len(signs - {0}) > 1:
+        return "unstable_sign_flip"
+    if spread >= 0.35:
+        return "unstable_large_spread"
+    return "stable"
+
+
+def _rolling_warning(windows):
+    stability = _correlation_stability(windows)
+    if stability == "insufficient_window_evidence":
+        return "Rolling windows have too few samples; use full-period correlation cautiously."
+    if stability.startswith("unstable"):
+        return "Correlation strength changes across windows; do not extrapolate one window into live timing."
+    return None
+
+
 def _count_daily_historical(rows):
     return sum(1 for row in rows if _is_daily_historical(row))
 
@@ -183,6 +253,26 @@ def _resolution_summary(rows):
         "tick_source": bool(payload.get("tick_source")) if payload else None,
         "warning": payload.get("resolution_warning") if daily_count else None,
     }
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    candidates = [text, text[:26], text[:19], text[:10]]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+    return None
 
 
 def _overall_regime(pair_results):

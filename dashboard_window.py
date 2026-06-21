@@ -180,6 +180,7 @@ class TossDashboardWindow(object):
         score_frame = ttk.Frame(bottom, padding=8)
         chart_frame = ttk.Frame(bottom, padding=8)
         paper_frame = ttk.Frame(bottom, padding=8)
+        tick_frame = ttk.Frame(bottom, padding=8)
         gpt_frame = ttk.Frame(bottom, padding=8)
         events_frame = ttk.Frame(bottom, padding=8)
         context_frame = ttk.Frame(bottom, padding=8)
@@ -189,6 +190,7 @@ class TossDashboardWindow(object):
         bottom.add(score_frame, text="Score Trend")
         bottom.add(chart_frame, text="Minute Chart")
         bottom.add(paper_frame, text="Paper")
+        bottom.add(tick_frame, text="Tick Flow")
         bottom.add(gpt_frame, text="GPT By Symbol")
         bottom.add(events_frame, text="Events By Symbol")
         bottom.add(context_frame, text="Context")
@@ -217,6 +219,39 @@ class TossDashboardWindow(object):
             self.paper_tree.heading(col, text=col.title())
             self.paper_tree.column(col, width=width, anchor="e" if col not in ("created", "symbol", "status", "outcome") else "w")
         self.paper_tree.pack(fill="both", expand=True)
+
+        tick_columns = ("symbol", "time", "trades", "change", "volume", "bid", "ask", "spread", "imbalance", "signal", "quality")
+        self.tick_tree = ttk.Treeview(tick_frame, columns=tick_columns, show="headings")
+        tick_widths = {
+            "symbol": 80,
+            "time": 180,
+            "trades": 70,
+            "change": 90,
+            "volume": 90,
+            "bid": 90,
+            "ask": 90,
+            "spread": 90,
+            "imbalance": 90,
+            "signal": 180,
+            "quality": 120,
+        }
+        tick_labels = {
+            "symbol": "Symbol",
+            "time": "Analyzed",
+            "trades": "Trades",
+            "change": "Tick %",
+            "volume": "Volume",
+            "bid": "Best Bid",
+            "ask": "Best Ask",
+            "spread": "Spread %",
+            "imbalance": "Imbalance",
+            "signal": "Signal",
+            "quality": "Quality",
+        }
+        for col in tick_columns:
+            self.tick_tree.heading(col, text=tick_labels[col])
+            self.tick_tree.column(col, width=tick_widths[col], anchor="w" if col in ("symbol", "time", "signal", "quality") else "e")
+        self.tick_tree.pack(fill="both", expand=True)
 
         self.gpt_text = tk.Text(gpt_frame, wrap="word", height=9, font=("Segoe UI", 10), relief="solid", borderwidth=1)
         self.gpt_text.pack(fill="both", expand=True)
@@ -390,6 +425,7 @@ class TossDashboardWindow(object):
                 _fmt(paper.get("min_return_pct"), 4, signed=True),
                 paper.get("outcome") or "",
             ))
+        self._render_tick_flow()
 
         selection = self.symbol_tree.selection()
         if selection:
@@ -531,6 +567,28 @@ class TossDashboardWindow(object):
                 event.get("severity"),
                 _fmt(event.get("value"), 2),
                 event.get("message"),
+            ))
+
+    def _render_tick_flow(self):
+        if not hasattr(self, "tick_tree"):
+            return
+        self.tick_tree.delete(*self.tick_tree.get_children())
+        for row in (self.snapshot or {}).get("symbols") or []:
+            tick = row.get("tick_analysis") or {}
+            payload = _parse_json(tick.get("payload_json"))
+            quality = payload.get("data_quality") or {}
+            self.tick_tree.insert("", "end", iid=row.get("symbol"), values=(
+                row.get("symbol"),
+                tick.get("analyzed_at") or "-",
+                tick.get("trade_count") or 0,
+                _fmt(tick.get("price_change_pct"), 4, signed=True),
+                _fmt(tick.get("volume_sum"), 2),
+                _fmt(tick.get("best_bid"), 2),
+                _fmt(tick.get("best_ask"), 2),
+                _fmt(tick.get("spread_pct"), 4),
+                _fmt(tick.get("orderbook_imbalance"), 4, signed=True),
+                tick.get("signal") or "-",
+                quality.get("status") or "-",
             ))
 
     def _render_domestic(self):
@@ -726,7 +784,9 @@ class TossDashboardWindow(object):
             "KR-US Relationship",
             "  regime: {}".format(relationship.get("relationship_regime") or "insufficient_evidence"),
             "  paired_observation_count: {}".format(quality.get("paired_observation_count") or 0),
+            "  daily_historical_observation_count: {}".format(quality.get("daily_historical_observation_count") or 0),
             "  min_samples: {}".format(quality.get("min_samples") or "-"),
+            "  resolution_warning: {}".format(quality.get("resolution_warning") or "-"),
             "  warning: {}".format(quality.get("warning") or "-"),
             "  proxy_alignment: {}".format("yes" if quality.get("uses_proxy_alignment") else "no"),
         ])
@@ -737,17 +797,27 @@ class TossDashboardWindow(object):
                 regression = item.get("regression") or {}
                 directional = item.get("directional_stats") or {}
                 gap = item.get("gap_effect") or {}
+                resolution = item.get("resolution") or {}
+                rolling = item.get("rolling_correlation") or {}
+                windows = rolling.get("windows") or {}
                 lines.append(
-                    "    {kr}->{us} lag={lag} n={samples} corr={corr} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} gap={gap_status} reversal={reversal} regime={regime}".format(
+                    "    {kr}->{us} lag={lag} res={res} n={samples} corr={corr} 3m={c3m} 6m={c6m} 1y={c1y} 3y={c3y} 10y={c10y} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} stability={stability} gap={gap_status} reversal={reversal} regime={regime}".format(
                         kr=item.get("source_symbol") or "-",
                         us=item.get("target_symbol") or "-",
                         lag=item.get("lag_label") or "-",
+                        res=resolution.get("timeframe") or "-",
                         samples=item.get("paired_sample_count") or 0,
                         corr=_fmt(item.get("correlation"), 4, signed=True),
+                        c3m=_fmt(((windows.get("3m") or {}).get("correlation")), 4, signed=True),
+                        c6m=_fmt(((windows.get("6m") or {}).get("correlation")), 4, signed=True),
+                        c1y=_fmt(((windows.get("1y") or {}).get("correlation")), 4, signed=True),
+                        c3y=_fmt(((windows.get("3y") or {}).get("correlation")), 4, signed=True),
+                        c10y=_fmt(((windows.get("10y") or {}).get("correlation")), 4, signed=True),
                         beta=_fmt(regression.get("beta"), 4, signed=True),
                         hit_up=_fmt(((directional.get("hit_ratio_up") or {}).get("hit_ratio")), 4),
                         hit_down=_fmt(((directional.get("hit_ratio_down") or {}).get("hit_ratio")), 4),
                         lead=_fmt(item.get("lead_score"), 2),
+                        stability=rolling.get("stability") or "-",
                         gap_status=gap.get("status") or "-",
                         reversal=_fmt(gap.get("reversal_rate"), 4),
                         regime=item.get("relationship_regime") or "-",
@@ -771,6 +841,8 @@ class TossDashboardWindow(object):
             "KR-US Relationship",
             "  regime: {}".format(relationship.get("relationship_regime") or "insufficient_evidence"),
             "  paired_observation_count: {}".format(quality.get("paired_observation_count") or 0),
+            "  daily_historical_observation_count: {}".format(quality.get("daily_historical_observation_count") or 0),
+            "  resolution_warning: {}".format(quality.get("resolution_warning") or "-"),
             "  warning: {}".format(quality.get("warning") or "-"),
         ]
         pairs = [
@@ -782,17 +854,27 @@ class TossDashboardWindow(object):
                 regression = item.get("regression") or {}
                 directional = item.get("directional_stats") or {}
                 gap = item.get("gap_effect") or {}
+                resolution = item.get("resolution") or {}
+                rolling = item.get("rolling_correlation") or {}
+                windows = rolling.get("windows") or {}
                 lines.append(
-                    "  {kr}->{us} lag={lag} n={samples} corr={corr} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} gap={gap_status} reversal={reversal} regime={regime}".format(
+                    "  {kr}->{us} lag={lag} res={res} n={samples} corr={corr} 3m={c3m} 6m={c6m} 1y={c1y} 3y={c3y} 10y={c10y} beta={beta} hit_up={hit_up} hit_down={hit_down} lead={lead} stability={stability} gap={gap_status} reversal={reversal} regime={regime}".format(
                         kr=item.get("source_symbol") or "-",
                         us=item.get("target_symbol") or "-",
                         lag=item.get("lag_label") or "-",
+                        res=resolution.get("timeframe") or "-",
                         samples=item.get("paired_sample_count") or 0,
                         corr=_fmt(item.get("correlation"), 4, signed=True),
+                        c3m=_fmt(((windows.get("3m") or {}).get("correlation")), 4, signed=True),
+                        c6m=_fmt(((windows.get("6m") or {}).get("correlation")), 4, signed=True),
+                        c1y=_fmt(((windows.get("1y") or {}).get("correlation")), 4, signed=True),
+                        c3y=_fmt(((windows.get("3y") or {}).get("correlation")), 4, signed=True),
+                        c10y=_fmt(((windows.get("10y") or {}).get("correlation")), 4, signed=True),
                         beta=_fmt(regression.get("beta"), 4, signed=True),
                         hit_up=_fmt(((directional.get("hit_ratio_up") or {}).get("hit_ratio")), 4),
                         hit_down=_fmt(((directional.get("hit_ratio_down") or {}).get("hit_ratio")), 4),
                         lead=_fmt(item.get("lead_score"), 2),
+                        stability=rolling.get("stability") or "-",
                         gap_status=gap.get("status") or "-",
                         reversal=_fmt(gap.get("reversal_rate"), 4),
                         regime=item.get("relationship_regime") or "-",
@@ -808,6 +890,11 @@ class TossDashboardWindow(object):
         daily = detail.get("daily") or {}
         previous = detail.get("previous_analysis") or {}
         latest_price = detail.get("latest_price") or {}
+        tick = detail.get("tick_analysis") or {}
+        tick_payload = _parse_json(tick.get("payload_json"))
+        tick_quality = tick_payload.get("data_quality") or {}
+        recent_trades = detail.get("recent_trades") or []
+        orderbook = detail.get("orderbook") or {}
         lines = [
             "Symbol: {}".format(row.get("symbol")),
             "Decision: {} | Score: {} | Delta: {}".format(row.get("decision"), _fmt(row.get("interest_score"), 0), _fmt(row.get("score_delta"), 0, signed=True)),
@@ -820,6 +907,42 @@ class TossDashboardWindow(object):
                 _fmt((row.get("return_feedback") or {}).get("best_return_pct"), 4, signed=True),
                 _fmt((row.get("return_feedback") or {}).get("worst_return_pct"), 4, signed=True),
                 _fmt((row.get("return_feedback") or {}).get("worst_path_return_pct"), 4, signed=True),
+            ),
+            "",
+            "Tick Flow",
+            "  analyzed_at={} trades={} signal={} severity={} quality={}".format(
+                tick.get("analyzed_at") or "-",
+                tick.get("trade_count") or 0,
+                tick.get("signal") or "-",
+                tick.get("severity") or "-",
+                tick_quality.get("status") or "-",
+            ),
+            "  latest={} oldest={} change={} volume_sum={}".format(
+                _fmt(tick.get("latest_price"), 2),
+                _fmt(tick.get("oldest_price"), 2),
+                _fmt(tick.get("price_change_pct"), 4, signed=True),
+                _fmt(tick.get("volume_sum"), 2),
+            ),
+            "  best_bid={} best_ask={} spread_pct={} imbalance={}".format(
+                _fmt(tick.get("best_bid"), 2),
+                _fmt(tick.get("best_ask"), 2),
+                _fmt(tick.get("spread_pct"), 4),
+                _fmt(tick.get("orderbook_imbalance"), 4, signed=True),
+            ),
+            "  latest_orderbook_at={} raw_spread={}".format(
+                orderbook.get("collected_at") or "-",
+                _fmt(orderbook.get("spread"), 4),
+            ),
+            "  recent_trades: {}".format(
+                "; ".join(
+                    "{} px={} vol={} src={}".format(
+                        item.get("trade_timestamp") or item.get("collected_at") or "-",
+                        _fmt(item.get("price"), 2),
+                        _fmt(item.get("volume"), 2),
+                        item.get("source") or "-",
+                    )
+                    for item in recent_trades[:5]
+                ) or "none"
             ),
             "",
             "1m Candle",

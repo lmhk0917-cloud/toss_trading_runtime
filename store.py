@@ -169,6 +169,57 @@ class TossRuntimeStore(object):
                 payload_json TEXT
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collected_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                trade_timestamp TEXT,
+                price REAL,
+                volume REAL,
+                side TEXT,
+                currency TEXT,
+                source TEXT NOT NULL,
+                payload_json TEXT,
+                UNIQUE(symbol, trade_timestamp, price, volume, source)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collected_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                source_timestamp TEXT,
+                currency TEXT,
+                best_bid REAL,
+                best_ask REAL,
+                bid_volume REAL,
+                ask_volume REAL,
+                spread REAL,
+                spread_pct REAL,
+                imbalance REAL,
+                payload_json TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS tick_analysis_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analyzed_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                trade_count INTEGER NOT NULL,
+                latest_price REAL,
+                oldest_price REAL,
+                price_change_pct REAL,
+                volume_sum REAL,
+                best_bid REAL,
+                best_ask REAL,
+                spread_pct REAL,
+                orderbook_imbalance REAL,
+                signal TEXT,
+                severity TEXT,
+                payload_json TEXT
+            )
+        """)
         self._ensure_column("paper_trade_candidates", "max_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "min_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "outcome", "TEXT")
@@ -180,6 +231,9 @@ class TossRuntimeStore(object):
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_pair_time ON market_relationship_observations(source_symbol, target_symbol, lag_label, observed_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_ticks_symbol_time ON trade_ticks(symbol, trade_timestamp, collected_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_symbol_time ON orderbook_snapshots(symbol, collected_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tick_analysis_symbol_time ON tick_analysis_snapshots(symbol, analyzed_at)")
         self.conn.commit()
 
     def _ensure_column(self, table, column, column_type):
@@ -510,6 +564,9 @@ class TossRuntimeStore(object):
             "domestic_feedback_summary",
             "domestic_signal_summary",
             "market_relationship_observations",
+            "trade_ticks",
+            "orderbook_snapshots",
+            "tick_analysis_snapshots",
         ]:
             tables[table] = self.count_rows(table)
         latest_analysis = self.conn.execute("""
@@ -728,6 +785,148 @@ class TossRuntimeStore(object):
         """.format(where=where), params).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def save_trade_ticks(self, symbol, trades_payload, collected_at=None, source="toss_trades"):
+        collected_at = collected_at or _now()
+        symbol = str(symbol or "").upper()
+        rows = _payload_rows(trades_payload)
+        inserted = 0
+        for row in rows:
+            cursor = self.conn.execute("""
+                INSERT OR IGNORE INTO trade_ticks (
+                    collected_at, symbol, trade_timestamp, price, volume,
+                    side, currency, source, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                collected_at,
+                symbol,
+                _pick(row, "timestamp", "tradeTimestamp", "executedAt", "time"),
+                _to_float(_pick(row, "price", "lastPrice", "tradePrice", "executionPrice")),
+                _to_float(_pick(row, "volume", "quantity", "tradeVolume", "executionVolume")),
+                _pick(row, "side", "tradeSide", "executionSide"),
+                _pick(row, "currency"),
+                source,
+                _json(row),
+            ))
+            inserted += cursor.rowcount
+        self.conn.commit()
+        return inserted
+
+    def save_price_poll_tick(self, symbol, price_row, collected_at=None):
+        collected_at = collected_at or _now()
+        row = price_row or {}
+        payload = {
+            "timestamp": row.get("timestamp") or collected_at,
+            "price": row.get("lastPrice") or row.get("price"),
+            "volume": row.get("volume") or 0,
+            "currency": row.get("currency"),
+            "source_symbol": row.get("symbol"),
+        }
+        return self.save_trade_ticks(symbol, {"result": [payload]}, collected_at=collected_at, source="price_poll_fallback")
+
+    def save_orderbook_snapshot(self, symbol, orderbook_payload, collected_at=None):
+        collected_at = collected_at or _now()
+        symbol = str(symbol or "").upper()
+        item = _payload_object(orderbook_payload)
+        bids = item.get("bids") or []
+        asks = item.get("asks") or []
+        best_bid, bid_volume = _best_level(bids, prefer_high=True)
+        best_ask, ask_volume = _best_level(asks, prefer_high=False)
+        spread = best_ask - best_bid if best_ask > 0 and best_bid > 0 else 0.0
+        midpoint = (best_ask + best_bid) / 2.0 if best_ask > 0 and best_bid > 0 else 0.0
+        spread_pct = (spread / midpoint) * 100.0 if midpoint > 0 else 0.0
+        total_depth = bid_volume + ask_volume
+        imbalance = ((bid_volume - ask_volume) / total_depth) if total_depth > 0 else 0.0
+        self.conn.execute("""
+            INSERT INTO orderbook_snapshots (
+                collected_at, symbol, source_timestamp, currency, best_bid,
+                best_ask, bid_volume, ask_volume, spread, spread_pct,
+                imbalance, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            collected_at,
+            symbol,
+            item.get("timestamp"),
+            item.get("currency"),
+            best_bid,
+            best_ask,
+            bid_volume,
+            ask_volume,
+            spread,
+            spread_pct,
+            imbalance,
+            _json(item),
+        ))
+        self.conn.commit()
+        return 1
+
+    def save_tick_analysis(self, analysis):
+        analysis = analysis or {}
+        self.conn.execute("""
+            INSERT INTO tick_analysis_snapshots (
+                analyzed_at, symbol, trade_count, latest_price, oldest_price,
+                price_change_pct, volume_sum, best_bid, best_ask, spread_pct,
+                orderbook_imbalance, signal, severity, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            analysis.get("analyzed_at") or _now(),
+            str(analysis.get("symbol") or "").upper(),
+            _to_int(analysis.get("trade_count")),
+            _to_float(analysis.get("latest_price")),
+            _to_float(analysis.get("oldest_price")),
+            _to_float(analysis.get("price_change_pct")),
+            _to_float(analysis.get("volume_sum")),
+            _to_float(analysis.get("best_bid")),
+            _to_float(analysis.get("best_ask")),
+            _to_float(analysis.get("spread_pct")),
+            _to_float(analysis.get("orderbook_imbalance")),
+            analysis.get("signal"),
+            analysis.get("severity"),
+            _json(analysis),
+        ))
+        self.conn.commit()
+        return 1
+
+    def latest_tick_analysis(self, symbols=None):
+        symbols = [str(item).upper() for item in symbols or [] if str(item).strip()]
+        result = {}
+        if not symbols:
+            rows = self.conn.execute("""
+                SELECT symbol FROM tick_analysis_snapshots
+                GROUP BY symbol
+                ORDER BY symbol
+            """).fetchall()
+            symbols = [row["symbol"] for row in rows]
+        for symbol in symbols:
+            row = self.conn.execute("""
+                SELECT *
+                FROM tick_analysis_snapshots
+                WHERE symbol = ?
+                ORDER BY analyzed_at DESC, id DESC
+                LIMIT 1
+            """, (symbol,)).fetchone()
+            result[symbol] = dict(row) if row else None
+        return result
+
+    def recent_trade_ticks(self, symbol, limit=50):
+        rows = self.conn.execute("""
+            SELECT *
+            FROM trade_ticks
+            WHERE symbol = ?
+            ORDER BY trade_timestamp DESC, collected_at DESC, id DESC
+            LIMIT ?
+        """, (str(symbol).upper(), int(limit))).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_orderbook_snapshot(self, symbol):
+        row = self.conn.execute("""
+            SELECT *
+            FROM orderbook_snapshots
+            WHERE symbol = ?
+            ORDER BY collected_at DESC, id DESC
+            LIMIT 1
+        """, (str(symbol).upper(),)).fetchone()
+        return dict(row) if row else None
+
     def count_rows(self, table):
         row = self.conn.execute("SELECT COUNT(1) AS count FROM {}".format(table)).fetchone()
         return int(row["count"])
@@ -738,6 +937,55 @@ class TossRuntimeStore(object):
 
 def _json(value):
     return json.dumps(sanitize_payload(value), ensure_ascii=False, default=str)
+
+
+def _payload_rows(payload):
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)]
+    if isinstance(result, dict):
+        for key in ("trades", "items", "data"):
+            rows = result.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+        return [result]
+    return []
+
+
+def _payload_object(payload):
+    if isinstance(payload, dict):
+        result = payload.get("result")
+        if isinstance(result, dict):
+            return result
+        return payload
+    return {}
+
+
+def _pick(row, *keys):
+    for key in keys:
+        value = (row or {}).get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _best_level(levels, prefer_high):
+    parsed = []
+    for row in levels or []:
+        if not isinstance(row, dict):
+            continue
+        price = _to_float(row.get("price"))
+        volume = _to_float(row.get("volume"))
+        if price > 0:
+            parsed.append((price, volume))
+    if not parsed:
+        return 0.0, 0.0
+    parsed.sort(key=lambda item: item[0], reverse=prefer_high)
+    return parsed[0]
 
 
 def _now():

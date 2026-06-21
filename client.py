@@ -87,6 +87,16 @@ class TossInvestClient(object):
             query["before"] = before
         return self._request_json("GET", "/api/v1/candles", query=query)
 
+    def get_trades(self, symbol, count=50):
+        count = max(1, min(50, int(count)))
+        return self._request_json("GET", "/api/v1/trades", query={"symbol": str(symbol).upper(), "count": count})
+
+    def get_orderbook(self, symbol):
+        return self._request_json("GET", "/api/v1/orderbook", query={"symbol": str(symbol).upper()})
+
+    def get_price_limits(self, symbol):
+        return self._request_json("GET", "/api/v1/price-limits", query={"symbol": str(symbol).upper()})
+
     def get_stocks(self, symbols):
         if isinstance(symbols, (list, tuple)):
             symbols = ",".join([str(item).upper() for item in symbols])

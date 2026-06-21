@@ -56,6 +56,7 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
     summary = store.operational_summary()
     return_feedback = store.return_feedback_by_symbol()
     structured = store.latest_structured_by_symbol(symbols)
+    tick_analysis = store.latest_tick_analysis(symbols)
     rows = []
     for symbol in symbols:
         latest_price = _latest_price(store, symbol)
@@ -94,8 +95,12 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
                 "daily": _parse_json_payload(daily.get("payload_json")),
                 "latest_price": latest_price,
                 "previous_analysis": previous,
+                "tick_analysis": tick_analysis.get(symbol) or {},
+                "recent_trades": store.recent_trade_ticks(symbol, limit=20),
+                "orderbook": store.latest_orderbook_snapshot(symbol) or {},
             },
             "minute_series": _minute_close_series(store, symbol),
+            "tick_analysis": tick_analysis.get(symbol) or {},
         })
     latest_gpt = _latest_gpt_analysis(store, mode="focused_watchlist")
     domestic_gpt = _latest_gpt_analysis(store, mode="domestic_kr")
@@ -129,6 +134,7 @@ def render_dashboard_html(snapshot):
     tables = summary.get("tables") or {}
     latest = snapshot.get("latest_analysis") or {}
     symbol_rows = "\n".join(_symbol_row(row) for row in snapshot.get("symbols") or [])
+    tick_rows = "\n".join(_tick_row((row.get("tick_analysis") or {})) for row in snapshot.get("symbols") or [])
     event_rows = "\n".join(_event_row(row) for row in snapshot.get("recent_events") or [])
     feedback_rows = "\n".join(_feedback_row(row) for row in snapshot.get("paper_feedback") or [])
     domestic_rows = "\n".join(_domestic_row(row) for row in snapshot.get("domestic") or [])
@@ -266,6 +272,13 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     </table>
   </section>
   <section>
+    <h2>Tick Flow</h2>
+    <table>
+      <thead><tr><th>Symbol</th><th>Analyzed</th><th class="num">Trades</th><th class="num">Tick %</th><th class="num">Volume</th><th class="num">Bid</th><th class="num">Ask</th><th class="num">Spread %</th><th class="num">Imbalance</th><th>Signal</th><th>Quality</th></tr></thead>
+      <tbody>{tick_rows}</tbody>
+    </table>
+  </section>
+  <section>
     <h2>Recent Events</h2>
     <table>
       <thead><tr><th>Time</th><th>Symbol</th><th>Event</th><th>Severity</th><th class="num">Value</th><th>Message</th></tr></thead>
@@ -291,11 +304,12 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     <div class="metrics">
       <div class="metric"><div class="label">Regime</div><div class="value">{relationship_regime}</div></div>
       <div class="metric"><div class="label">Paired Samples</div><div class="value">{relationship_samples}</div></div>
+      <div class="metric"><div class="label">Resolution</div><div class="value">{relationship_resolution}</div></div>
       <div class="metric"><div class="label">Warning</div><div class="value">{relationship_warning}</div></div>
       <div class="metric"><div class="label">Proxy</div><div class="value">{relationship_proxy}</div></div>
     </div>
     <table>
-      <thead><tr><th>KR</th><th>US</th><th>Lag</th><th class="num">Samples</th><th class="num">Corr</th><th class="num">Beta</th><th class="num">R2</th><th class="num">Hit Up</th><th class="num">Hit Down</th><th class="num">Lead</th><th>Gap</th><th class="num">Reversal</th><th>Regime</th></tr></thead>
+      <thead><tr><th>KR</th><th>US</th><th>Lag</th><th>Res</th><th class="num">Samples</th><th class="num">Corr</th><th class="num">3M</th><th class="num">6M</th><th class="num">1Y</th><th class="num">3Y</th><th class="num">10Y</th><th class="num">Beta</th><th class="num">R2</th><th class="num">Hit Up</th><th class="num">Hit Down</th><th class="num">Lead</th><th>Stability</th><th>Regime</th></tr></thead>
       <tbody>{relationship_rows}</tbody>
     </table>
   </section>
@@ -324,12 +338,14 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
         warning_count=_e(len(warnings)),
         warning_text=_e(warning_text),
         symbol_rows=symbol_rows,
+        tick_rows=tick_rows,
         event_rows=event_rows,
         feedback_rows=feedback_rows,
         domestic_rows=domestic_rows,
         relationship_regime=_e(relationship.get("relationship_regime") or "insufficient_evidence"),
         relationship_samples=_e(((relationship.get("data_quality") or {}).get("paired_observation_count")) or 0),
-        relationship_warning=_e(((relationship.get("data_quality") or {}).get("warning")) or "none"),
+        relationship_resolution=_e(_relationship_resolution_label(relationship)),
+        relationship_warning=_e(((relationship.get("data_quality") or {}).get("warning")) or ((relationship.get("data_quality") or {}).get("resolution_warning")) or "none"),
         relationship_proxy=_e("yes" if ((relationship.get("data_quality") or {}).get("uses_proxy_alignment")) else "no"),
         relationship_rows=relationship_rows,
         context_time=_e(context.get("collected_at") or ""),
@@ -394,6 +410,27 @@ def _event_row(row):
     )
 
 
+def _tick_row(row):
+    quality = _parse_json_payload(row.get("payload_json")).get("data_quality") if row.get("payload_json") else {}
+    if not row:
+        return """<tr><td colspan="11" class="muted">No tick flow analysis yet.</td></tr>"""
+    return """<tr><td><strong>{symbol}</strong></td><td>{time}</td><td class="num">{count}</td><td class="num {chg_class}">{change}</td><td class="num">{volume}</td><td class="num">{bid}</td><td class="num">{ask}</td><td class="num">{spread}</td><td class="num {imb_class}">{imbalance}</td><td>{signal}</td><td>{quality}</td></tr>""".format(
+        symbol=_e(row.get("symbol")),
+        time=_e(row.get("analyzed_at") or ""),
+        count=_e(row.get("trade_count") or 0),
+        chg_class=_num_class(row.get("price_change_pct")),
+        change=_fmt(row.get("price_change_pct"), decimals=4, signed=True),
+        volume=_fmt(row.get("volume_sum"), decimals=2),
+        bid=_fmt(row.get("best_bid"), decimals=2),
+        ask=_fmt(row.get("best_ask"), decimals=2),
+        spread=_fmt(row.get("spread_pct"), decimals=4),
+        imb_class=_num_class(row.get("orderbook_imbalance")),
+        imbalance=_fmt(row.get("orderbook_imbalance"), decimals=4, signed=True),
+        signal=_e(row.get("signal") or "-"),
+        quality=_e((quality or {}).get("status") or "-"),
+    )
+
+
 def _feedback_row(row):
     return """<tr><td>{symbol}</td><td class="num">{horizon}</td><td class="num">{count}</td><td class="num">{win}</td><td class="num {avg_class}">{avg}</td><td class="num {best_class}">{best}</td><td class="num {worst_class}">{worst}</td></tr>""".format(
         symbol=_e(row.get("symbol")),
@@ -443,24 +480,42 @@ def _domestic_row(row):
 def _relationship_row(row):
     regression = row.get("regression") or {}
     directional = row.get("directional_stats") or {}
-    gap = row.get("gap_effect") or {}
+    resolution = row.get("resolution") or {}
+    rolling = row.get("rolling_correlation") or {}
+    windows = rolling.get("windows") or {}
     hit_up = (directional.get("hit_ratio_up") or {}).get("hit_ratio")
     hit_down = (directional.get("hit_ratio_down") or {}).get("hit_ratio")
-    return """<tr><td>{kr}</td><td>{us}</td><td>{lag}</td><td class="num">{samples}</td><td class="num">{corr}</td><td class="num">{beta}</td><td class="num">{r2}</td><td class="num">{hit_up}</td><td class="num">{hit_down}</td><td class="num">{lead}</td><td>{gap_status}</td><td class="num">{reversal}</td><td>{regime}</td></tr>""".format(
+    return """<tr><td>{kr}</td><td>{us}</td><td>{lag}</td><td><span class="pill">{res}</span></td><td class="num">{samples}</td><td class="num">{corr}</td><td class="num">{corr_3m}</td><td class="num">{corr_6m}</td><td class="num">{corr_1y}</td><td class="num">{corr_3y}</td><td class="num">{corr_10y}</td><td class="num">{beta}</td><td class="num">{r2}</td><td class="num">{hit_up}</td><td class="num">{hit_down}</td><td class="num">{lead}</td><td>{stability}</td><td>{regime}</td></tr>""".format(
         kr=_e(row.get("source_symbol")),
         us=_e(row.get("target_symbol")),
         lag=_e(row.get("lag_label")),
+        res=_e(resolution.get("timeframe") or "unknown"),
         samples=_e(row.get("paired_sample_count")),
         corr=_fmt(row.get("correlation"), decimals=4),
+        corr_3m=_fmt((windows.get("3m") or {}).get("correlation"), decimals=4),
+        corr_6m=_fmt((windows.get("6m") or {}).get("correlation"), decimals=4),
+        corr_1y=_fmt((windows.get("1y") or {}).get("correlation"), decimals=4),
+        corr_3y=_fmt((windows.get("3y") or {}).get("correlation"), decimals=4),
+        corr_10y=_fmt((windows.get("10y") or {}).get("correlation"), decimals=4),
         beta=_fmt(regression.get("beta"), decimals=4, signed=True),
         r2=_fmt(regression.get("r_squared"), decimals=4),
         hit_up=_fmt(hit_up, decimals=4),
         hit_down=_fmt(hit_down, decimals=4),
         lead=_fmt(row.get("lead_score"), decimals=2),
-        gap_status=_e(gap.get("status") or "-"),
-        reversal=_fmt(gap.get("reversal_rate"), decimals=4),
+        stability=_e(rolling.get("stability") or "-"),
         regime=_e(row.get("relationship_regime")),
     )
+
+
+def _relationship_resolution_label(relationship):
+    quality = relationship.get("data_quality") or {}
+    daily = _to_int(quality.get("daily_historical_observation_count"))
+    total = _to_int(quality.get("paired_observation_count"))
+    if daily and daily == total:
+        return "1d historical"
+    if daily:
+        return "mixed"
+    return "live/intraday"
 
 
 def _symbols_from_db(store):
