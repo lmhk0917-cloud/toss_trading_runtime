@@ -13,7 +13,14 @@ except ImportError:  # pragma: no cover
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CSV_DIR = os.path.join(PROJECT_ROOT, "market_data_exports", "csv")
+DEFAULT_CSV_DIR = os.path.join(
+    PROJECT_ROOT,
+    "market_data_exports",
+    "daily_history",
+    "yahoo_finance_10y_ai_semiconductor_1d",
+    "csv",
+)
+LEGACY_CSV_DIR = os.path.join(PROJECT_ROOT, "market_data_exports", "csv")
 DEFAULT_DOMESTIC = ["005930", "000660"]
 DEFAULT_US = ["NVDA", "MU", "QQQ", "SOXX", "AMD", "AVGO", "TSM", "SMH", "SPY"]
 HISTORICAL_LAG_LABELS = ["same_date_us_kr", "us_t_minus_1_to_kr_t"]
@@ -56,9 +63,17 @@ def main(argv=None):
 def build_historical_rows(csv_dir, domestic_codes, us_symbols):
     returns = {}
     for code in domestic_codes:
-        returns[code] = load_return_series(os.path.join(csv_dir, "{}_KS.csv".format(code)))
+        returns[code] = load_return_series(_resolve_csv_path(csv_dir, [
+            "krx_{}_1d.csv".format(code),
+            "krx_{}".format(code),
+            "{}_KS.csv".format(code),
+        ]))
     for symbol in us_symbols:
-        returns[symbol] = load_return_series(os.path.join(csv_dir, "{}.csv".format(symbol)))
+        returns[symbol] = load_return_series(_resolve_csv_path(csv_dir, [
+            "us_{}_1d.csv".format(symbol.lower()),
+            "us_{}".format(symbol.lower()),
+            "{}.csv".format(symbol),
+        ]))
 
     rows = []
     for code in domestic_codes:
@@ -75,6 +90,8 @@ def build_historical_rows(csv_dir, domestic_codes, us_symbols):
 
 
 def load_return_series(path):
+    if not path or not os.path.exists(path):
+        return pd.Series(dtype=float)
     frame = pd.read_csv(path)
     if frame.empty or "date" not in frame.columns:
         return pd.Series(dtype=float)
@@ -83,6 +100,24 @@ def load_return_series(path):
     frame["date"] = pd.to_datetime(frame["date"])
     series = frame.set_index("date")["daily_return_pct"].dropna()
     return series.sort_index()
+
+
+def _resolve_csv_path(csv_dir, names):
+    search_dirs = [csv_dir]
+    if os.path.abspath(csv_dir) != os.path.abspath(LEGACY_CSV_DIR):
+        search_dirs.append(LEGACY_CSV_DIR)
+    for directory in search_dirs:
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.exists(path):
+                return path
+            if "." not in os.path.basename(name):
+                matches = sorted(
+                    item for item in os.listdir(directory) if item.lower().startswith(name.lower()) and item.lower().endswith(".csv")
+                ) if os.path.exists(directory) else []
+                if matches:
+                    return os.path.join(directory, matches[0])
+    return os.path.join(csv_dir, names[0])
 
 
 def same_date_rows(code, kr, us_symbol, us):

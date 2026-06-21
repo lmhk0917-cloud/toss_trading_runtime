@@ -19,8 +19,15 @@ except ImportError:  # pragma: no cover
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CSV_DIR = os.path.join(PROJECT_ROOT, "market_data_exports", "csv")
-DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, "market_data_exports", "shared", "historical_market_data_v1.json")
+DEFAULT_EXPORT_ROOT = os.path.join(
+    PROJECT_ROOT,
+    "market_data_exports",
+    "daily_history",
+    "yahoo_finance_10y_ai_semiconductor_1d",
+)
+DEFAULT_CSV_DIR = os.path.join(DEFAULT_EXPORT_ROOT, "csv")
+LEGACY_CSV_DIR = os.path.join(PROJECT_ROOT, "market_data_exports", "csv")
+DEFAULT_OUTPUT = os.path.join(DEFAULT_EXPORT_ROOT, "shared", "historical_market_data_v1_daily_kr_us_ai_semiconductor.json")
 
 
 def main(argv=None):
@@ -58,12 +65,20 @@ def build_package(csv_dir, domestic_codes, us_symbols, include_relationships=Tru
     bars = []
     for code in domestic_codes:
         symbol_id = "{}.KS".format(code)
-        path = os.path.join(csv_dir, "{}_KS.csv".format(code))
+        path = resolve_csv_path(csv_dir, [
+            "krx_{}_1d.csv".format(code),
+            "krx_{}".format(code),
+            "{}_KS.csv".format(code),
+        ])
         symbol_bars = load_daily_bars(path, market="KRX", code=code, symbol=symbol_id, currency="KRW")
         symbols.append(symbol_summary("KRX", code, symbol_id, "KRW", symbol_bars))
         bars.extend(symbol_bars)
     for symbol in us_symbols:
-        path = os.path.join(csv_dir, "{}.csv".format(symbol))
+        path = resolve_csv_path(csv_dir, [
+            "us_{}_1d.csv".format(symbol.lower()),
+            "us_{}".format(symbol.lower()),
+            "{}.csv".format(symbol),
+        ])
         symbol_bars = load_daily_bars(path, market="US", code=symbol, symbol=symbol, currency="USD")
         symbols.append(symbol_summary("US", symbol, symbol, "USD", symbol_bars))
         bars.extend(symbol_bars)
@@ -119,6 +134,24 @@ def load_daily_bars(path, market, code, symbol, currency):
             "tick_source": False,
         })
     return rows
+
+
+def resolve_csv_path(csv_dir, names):
+    search_dirs = [csv_dir]
+    if os.path.abspath(csv_dir) != os.path.abspath(LEGACY_CSV_DIR):
+        search_dirs.append(LEGACY_CSV_DIR)
+    for directory in search_dirs:
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.exists(path):
+                return path
+            if "." not in os.path.basename(name):
+                matches = sorted(
+                    item for item in os.listdir(directory) if item.lower().startswith(name.lower()) and item.lower().endswith(".csv")
+                ) if os.path.exists(directory) else []
+                if matches:
+                    return os.path.join(directory, matches[0])
+    return os.path.join(csv_dir, names[0])
 
 
 def symbol_summary(market, code, symbol, currency, bars):
