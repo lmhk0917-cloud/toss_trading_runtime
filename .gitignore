@@ -13,6 +13,10 @@ __pycache__/
 reports/*
 !reports/.gitkeep
 
+watchlists/*.json
+!watchlists/*.example.json
+!watchlists/.gitkeep
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
