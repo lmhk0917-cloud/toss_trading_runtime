@@ -7,6 +7,8 @@ __pycache__/
 !.env.example
 
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

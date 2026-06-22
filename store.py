@@ -20,8 +20,10 @@ class TossRuntimeStore(object):
     def __init__(self, db_path=DEFAULT_DB_PATH):
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, timeout=30)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout = 30000")
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self.create_tables()
 
     def create_tables(self):
