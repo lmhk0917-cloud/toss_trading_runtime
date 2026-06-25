@@ -73,6 +73,10 @@ def main(argv=None):
                     len(iteration.get("errors") or []),
                 )
             )
+            summary["latest_iteration"] = iteration
+            summary["updated_at"] = _now()
+            summary["status"] = "running"
+            _write_summary(args.summary_json, summary)
             if index + 1 < max(1, int(args.iterations)):
                 time.sleep(max(1, int(args.interval_sec)))
         summary["finished_at"] = _now()

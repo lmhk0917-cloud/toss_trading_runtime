@@ -25,7 +25,9 @@ def build_relationship_evidence(
     domestic_codes = [str(item).strip() for item in domestic_codes or DEFAULT_DOMESTIC_CODES if str(item).strip()]
     us_symbols = [str(item).strip().upper() for item in us_symbols or DEFAULT_US_SYMBOLS if str(item).strip()]
     observations = store.relationship_observations(domestic_codes=domestic_codes, us_symbols=us_symbols)
-    kiwoom_daily = load_kiwoom_daily_returns(kiwoom_db_path or config.KIWOOM_PERSONAL_DB_PATH, domestic_codes)
+    resolved_kiwoom_db_path = kiwoom_db_path or config.KIWOOM_PERSONAL_DB_PATH
+    kiwoom_daily = load_kiwoom_daily_returns(resolved_kiwoom_db_path, domestic_codes)
+    kiwoom_market_context = load_latest_kiwoom_market_context(resolved_kiwoom_db_path)
     pair_results = _pair_results(observations, min_samples=min_samples, kiwoom_daily=kiwoom_daily)
     domestic_snapshot = store.domestic_snapshot(codes=domestic_codes)
     us_feedback = store.return_feedback_by_symbol()
@@ -61,10 +63,12 @@ def build_relationship_evidence(
         "relationship_regime": regime,
         "pairs": pair_results,
         "proxy_alignment": proxy,
+        "kiwoom_market_context": kiwoom_market_context,
         "interpretation_rules": [
             "Only pair results with paired_sample_count >= min_samples may be described as correlation evidence.",
             "Daily historical observations are not minute or tick evidence and must not be used for intraday timing.",
             "Proxy alignment is directional context, not correlation.",
+            "Kiwoom market context is domestic market background; use it as KOSPI/KOSDAQ/flow context, not US execution evidence.",
             "When data_quality.warning is present, GPT must state that relationship strength is not proven.",
         ],
     }
@@ -470,6 +474,78 @@ def load_kiwoom_daily_returns(db_path, codes=None):
         return result
     finally:
         conn.close()
+
+
+def load_latest_kiwoom_market_context(db_path, sections=None):
+    sections = sections or [
+        "market_indices",
+        "market_investor_flow",
+        "market_program_trading",
+        "derivatives",
+        "market_status",
+        "short_term_event_context",
+    ]
+    if not db_path or not os.path.exists(db_path):
+        return {
+            "status": "missing_db",
+            "db_path": db_path,
+            "sections": {},
+        }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _has_table(conn, "market_context_snapshots"):
+            return {
+                "status": "missing_table",
+                "db_path": db_path,
+                "sections": {},
+            }
+        result = {}
+        for section in sections:
+            rows = conn.execute("""
+                SELECT collected_at, code, section, source, reliability, summary, payload_json
+                FROM market_context_snapshots
+                WHERE section = ?
+                ORDER BY collected_at DESC, id DESC
+                LIMIT 3
+            """, (section,)).fetchall()
+            if rows:
+                result[section] = [_market_context_row(row) for row in rows]
+        return {
+            "status": "ok" if result else "empty",
+            "db_path": db_path,
+            "generated_at": _now(),
+            "sections": result,
+            "data_quality": {
+                "latest_collected_at": _latest_collected_at(result),
+                "section_count": len(result),
+                "warning": "Use domestic context as background only; verify Kiwoom TR units before using absolute index levels.",
+            },
+        }
+    finally:
+        conn.close()
+
+
+def _market_context_row(row):
+    payload = _parse_json(row["payload_json"])
+    return {
+        "collected_at": row["collected_at"],
+        "code": row["code"],
+        "section": row["section"],
+        "source": row["source"],
+        "reliability": row["reliability"],
+        "summary": row["summary"],
+        "payload": payload,
+    }
+
+
+def _latest_collected_at(sections):
+    values = []
+    for rows in (sections or {}).values():
+        for row in rows or []:
+            if row.get("collected_at"):
+                values.append(str(row.get("collected_at")))
+    return max(values) if values else None
 
 
 def _daily_returns_from_ticks(rows):

@@ -4,6 +4,7 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -703,24 +704,34 @@ def _latest_context(store):
 def _gpt_sections_by_symbol(text, symbols):
     text = text or ""
     sections = {}
-    upper = text.upper()
     markers = []
-    for symbol in symbols or []:
-        symbol = str(symbol).upper()
-        candidates = [
-            "SYMBOL: {}".format(symbol),
-            "SYMBOL : {}".format(symbol),
-        ]
-        found = -1
-        for candidate in candidates:
-            idx = upper.find(candidate)
-            if idx >= 0 and (found < 0 or idx < found):
-                found = idx
-        if found >= 0:
-            markers.append((found, symbol))
-    markers.sort()
+    boundaries = []
+    symbol_set = set(str(symbol).upper() for symbol in symbols or [])
+    for match in re.finditer(r"(?:^|\n)\s*#{1,6}\s*(\S.*?)\s*(?:\n|$)", text, flags=re.IGNORECASE):
+        boundaries.append(match.start())
+        symbol = match.group(1).upper()
+        if symbol in symbol_set:
+            markers.append((match.start(), symbol))
+    for match in re.finditer(r"(?:^|\n)\s*[-#*\s_]*(?:\*{0,2}\s*SYMBOL\s*\*{0,2}\s*:\s*\*{0,2}\s*)([A-Z0-9.\-]{1,10})\b", text, flags=re.IGNORECASE):
+        boundaries.append(match.start())
+        symbol = match.group(1).upper()
+        if symbol in symbol_set:
+            markers.append((match.start(), symbol))
+    deduped = {}
+    for pos, symbol in markers:
+        deduped[symbol] = min(pos, deduped.get(symbol, pos))
+    markers = sorted((pos, symbol) for symbol, pos in deduped.items())
+    if not markers:
+        upper = text.upper()
+        for symbol in symbols or []:
+            symbol = str(symbol).upper()
+            idx = upper.find(symbol)
+            if idx >= 0:
+                markers.append((idx, symbol))
+        markers.sort()
     for index, (start, symbol) in enumerate(markers):
-        end = markers[index + 1][0] if index + 1 < len(markers) else len(text)
+        later_boundaries = [pos for pos in boundaries if pos > start + 20]
+        end = min(later_boundaries) if later_boundaries else len(text)
         section = text[start:end].strip()
         sections[symbol] = section
     for symbol in symbols or []:
@@ -739,20 +750,15 @@ def _parse_json_payload(value):
 
 def _display_summary(text, symbol):
     text = " ".join(str(text or "").split())
-    markers = [" SYMBOL:", " **SYMBOL:", " --- SYMBOL:", " --- **SYMBOL:"]
-    upper = text.upper()
     current = str(symbol or "").upper()
-    for marker in markers:
-        start = 0
-        while True:
-            idx = upper.find(marker, start)
-            if idx < 0:
-                break
-            tail = upper[idx + len(marker):].strip()
-            if current and tail.startswith(current):
-                start = idx + len(marker)
-                continue
-            return text[:idx].strip()
+    pattern = r"(?:\s---\s+#{1,6}\s*([A-Z0-9.\-]{1,10})\b|\s+\*{0,2}\s*SYMBOL\s*\*{0,2}\s*:\s*\*{0,2}\s*([A-Z0-9.\-]{1,10})\b)"
+    for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+        marker = (match.group(1) or match.group(2) or "").upper()
+        if marker == current:
+            continue
+        before = text[:match.start()].strip()
+        if before:
+            return before
     return text
 
 

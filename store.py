@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta
 
 try:
@@ -20,10 +21,11 @@ class TossRuntimeStore(object):
     def __init__(self, db_path=DEFAULT_DB_PATH):
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.conn = sqlite3.connect(db_path, timeout=30)
+        self.conn = sqlite3.connect(db_path, timeout=120)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout = 30000")
+        self.conn.execute("PRAGMA busy_timeout = 120000")
         self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA synchronous = NORMAL")
         self.create_tables()
 
     def create_tables(self):
@@ -225,30 +227,47 @@ class TossRuntimeStore(object):
         self._ensure_column("paper_trade_candidates", "max_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "min_return_pct", "REAL")
         self._ensure_column("paper_trade_candidates", "outcome", "TEXT")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_price_symbol_time ON price_snapshots(symbol, collected_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_candle_symbol_interval_time ON candle_snapshots(symbol, interval, collected_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_symbol_time ON event_logs(symbol, detected_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_status_due ON paper_trade_candidates(status, due_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_pair_time ON market_relationship_observations(source_symbol, target_symbol, lag_label, observed_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_ticks_symbol_time ON trade_ticks(symbol, trade_timestamp, collected_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_symbol_time ON orderbook_snapshots(symbol, collected_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tick_analysis_symbol_time ON tick_analysis_snapshots(symbol, analyzed_at)")
-        self.conn.commit()
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_price_symbol_time ON price_snapshots(symbol, collected_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_candle_symbol_interval_time ON candle_snapshots(symbol, interval, collected_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_events_symbol_time ON event_logs(symbol, detected_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_due ON paper_trade_candidates(status, due_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_relationship_pair_time ON market_relationship_observations(source_symbol, target_symbol, lag_label, observed_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_trade_ticks_symbol_time ON trade_ticks(symbol, trade_timestamp, collected_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_orderbook_symbol_time ON orderbook_snapshots(symbol, collected_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_tick_analysis_symbol_time ON tick_analysis_snapshots(symbol, analyzed_at)")
+        self._commit()
 
     def _ensure_column(self, table, column, column_type):
         existing = [row["name"] for row in self.conn.execute("PRAGMA table_info({})".format(table)).fetchall()]
         if column not in existing:
-            self.conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, column_type))
+            self._execute_write("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, column_type))
+
+    def _execute_write(self, query, params=()):
+        return self._with_write_retry(lambda: self.conn.execute(query, params))
+
+    def _commit(self):
+        return self._with_write_retry(self.conn.commit)
+
+    def _with_write_retry(self, func, max_attempts=8):
+        delay = 0.25
+        for attempt in range(max_attempts):
+            try:
+                return func()
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc) or attempt >= max_attempts - 1:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 1.7, 5.0)
 
     def save_evidence(self, evidence, events=None):
         evidence = evidence or {}
         collected_at = evidence.get("collected_at") or _now()
         prices = ((evidence.get("prices") or {}).get("result") or [])
         for item in prices:
-            self.conn.execute("""
+            self._execute_write("""
                 INSERT INTO price_snapshots (
                     collected_at, symbol, price, currency, source_timestamp, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?)
@@ -266,7 +285,7 @@ class TossRuntimeStore(object):
                 summary = item.get(key)
                 if not summary:
                     continue
-                self.conn.execute("""
+                self._execute_write("""
                     INSERT INTO candle_snapshots (
                         collected_at, symbol, interval, sample_count, latest_timestamp,
                         latest_close, change_pct, volume_ratio, payload_json
@@ -285,7 +304,7 @@ class TossRuntimeStore(object):
 
         fx = ((evidence.get("exchange_rate") or {}).get("result") or {})
         sessions = evidence.get("sessions") or {}
-        self.conn.execute("""
+        self._execute_write("""
             INSERT INTO market_context_snapshots (
                 collected_at, fx_rate, us_session, kr_session, payload_json
             ) VALUES (?, ?, ?, ?, ?)
@@ -302,11 +321,11 @@ class TossRuntimeStore(object):
         ))
 
         for event in events or []:
-            self.save_event(event)
-        self.conn.commit()
+            self.save_event(event, commit=False)
+        self._commit()
 
-    def save_event(self, event):
-        self.conn.execute("""
+    def save_event(self, event, commit=True):
+        self._execute_write("""
             INSERT INTO event_logs (
                 detected_at, symbol, event_type, severity, message, value, payload_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -319,10 +338,12 @@ class TossRuntimeStore(object):
             _to_float(event.get("value")),
             _json(event),
         ))
+        if commit:
+            self._commit()
 
     def save_analysis_result(self, evidence, gpt, events=None, mode="focused_watchlist"):
         usage = (gpt or {}).get("usage") or {}
-        cursor = self.conn.execute("""
+        cursor = self._execute_write("""
             INSERT INTO analysis_results (
                 analyzed_at, mode, symbols, model, prompt_tokens, completion_tokens,
                 total_tokens, gpt_analysis, evidence_json, events_json
@@ -339,7 +360,7 @@ class TossRuntimeStore(object):
             _json(evidence),
             _json(events or []),
         ))
-        self.conn.commit()
+        self._commit()
         return cursor.lastrowid
 
     def create_paper_candidates(self, analysis_id, evidence, horizons=(5, 10, 30, 60)):
@@ -352,7 +373,7 @@ class TossRuntimeStore(object):
                 continue
             for horizon in horizons:
                 due_at = _sqlite_datetime_plus_minutes(collected_at, horizon)
-                self.conn.execute("""
+                self._execute_write("""
                     INSERT INTO paper_trade_candidates (
                         created_at, analysis_id, symbol, anchor_price, horizon_min,
                         due_at, status, payload_json
@@ -368,7 +389,7 @@ class TossRuntimeStore(object):
                     _json({"source_timestamp": item.get("timestamp"), "currency": item.get("currency")}),
                 ))
                 created += 1
-        self.conn.commit()
+        self._commit()
         return created
 
     def evaluate_due_paper_candidates(self):
@@ -402,14 +423,14 @@ class TossRuntimeStore(object):
             max_return = max(returns) if returns else return_pct
             min_return = min(returns) if returns else return_pct
             outcome = "win" if return_pct > 0 else "loss" if return_pct < 0 else "flat"
-            self.conn.execute("""
+            self._execute_write("""
                 UPDATE paper_trade_candidates
                 SET status = 'evaluated', result_return_pct = ?, max_return_pct = ?,
                     min_return_pct = ?, outcome = ?, evaluated_at = ?
                 WHERE id = ?
             """, (round(return_pct, 4), round(max_return, 4), round(min_return, 4), outcome, now, row["id"]))
             evaluated += 1
-        self.conn.commit()
+        self._commit()
         return evaluated
 
     def paper_feedback_summary(self, limit=200):
@@ -522,7 +543,7 @@ class TossRuntimeStore(object):
 
     def save_structured_analysis(self, analysis_id, structured):
         for item in structured or []:
-            self.conn.execute("""
+            self._execute_write("""
                 INSERT INTO structured_analysis (
                     analysis_id, symbol, final_decision, interest_score, risk_level,
                     confidence, summary, payload_json
@@ -537,7 +558,7 @@ class TossRuntimeStore(object):
                 item.get("summary"),
                 _json(item),
             ))
-        self.conn.commit()
+        self._commit()
 
     def latest_structured_by_symbol(self, symbols):
         result = {}
@@ -604,7 +625,7 @@ class TossRuntimeStore(object):
         imported_at = _now()
         count = 0
         for row in rows or []:
-            self.conn.execute("""
+            self._execute_write("""
                 INSERT INTO domestic_feedback_summary (
                     source, code, name, horizon_min, sample_count, win_rate,
                     avg_return_pct, avg_win_return_pct, avg_loss_return_pct,
@@ -642,14 +663,14 @@ class TossRuntimeStore(object):
                 _json(row),
             ))
             count += 1
-        self.conn.commit()
+        self._commit()
         return count
 
     def upsert_domestic_signal_summary(self, rows):
         imported_at = _now()
         count = 0
         for row in rows or []:
-            self.conn.execute("""
+            self._execute_write("""
                 INSERT INTO domestic_signal_summary (
                     source, code, name, latest_detected_at, latest_action_hint,
                     latest_confidence_score, latest_risk_level, signal_count,
@@ -677,7 +698,7 @@ class TossRuntimeStore(object):
                 _json(row),
             ))
             count += 1
-        self.conn.commit()
+        self._commit()
         return count
 
     def domestic_snapshot(self, codes=None):
@@ -720,7 +741,7 @@ class TossRuntimeStore(object):
     def save_relationship_observations(self, rows):
         count = 0
         for row in rows or []:
-            self.conn.execute("""
+            self._execute_write("""
                 INSERT INTO market_relationship_observations (
                     observed_at, source_market, source_symbol, target_market,
                     target_symbol, source_return_pct, target_return_pct,
@@ -738,7 +759,7 @@ class TossRuntimeStore(object):
                 _json(row),
             ))
             count += 1
-        self.conn.commit()
+        self._commit()
         return count
 
     def delete_relationship_observations(self, domestic_codes=None, us_symbols=None, lag_labels=None):
@@ -758,11 +779,11 @@ class TossRuntimeStore(object):
             params.extend(lag_labels)
         if not clauses:
             return 0
-        cursor = self.conn.execute(
+        cursor = self._execute_write(
             "DELETE FROM market_relationship_observations WHERE {}".format(" AND ".join(clauses)),
             params,
         )
-        self.conn.commit()
+        self._commit()
         return cursor.rowcount
 
     def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=100000):
@@ -793,7 +814,7 @@ class TossRuntimeStore(object):
         rows = _payload_rows(trades_payload)
         inserted = 0
         for row in rows:
-            cursor = self.conn.execute("""
+            cursor = self._execute_write("""
                 INSERT OR IGNORE INTO trade_ticks (
                     collected_at, symbol, trade_timestamp, price, volume,
                     side, currency, source, payload_json
@@ -810,7 +831,7 @@ class TossRuntimeStore(object):
                 _json(row),
             ))
             inserted += cursor.rowcount
-        self.conn.commit()
+        self._commit()
         return inserted
 
     def save_price_poll_tick(self, symbol, price_row, collected_at=None):
@@ -838,7 +859,7 @@ class TossRuntimeStore(object):
         spread_pct = (spread / midpoint) * 100.0 if midpoint > 0 else 0.0
         total_depth = bid_volume + ask_volume
         imbalance = ((bid_volume - ask_volume) / total_depth) if total_depth > 0 else 0.0
-        self.conn.execute("""
+        self._execute_write("""
             INSERT INTO orderbook_snapshots (
                 collected_at, symbol, source_timestamp, currency, best_bid,
                 best_ask, bid_volume, ask_volume, spread, spread_pct,
@@ -858,12 +879,12 @@ class TossRuntimeStore(object):
             imbalance,
             _json(item),
         ))
-        self.conn.commit()
+        self._commit()
         return 1
 
     def save_tick_analysis(self, analysis):
         analysis = analysis or {}
-        self.conn.execute("""
+        self._execute_write("""
             INSERT INTO tick_analysis_snapshots (
                 analyzed_at, symbol, trade_count, latest_price, oldest_price,
                 price_change_pct, volume_sum, best_bid, best_ask, spread_pct,
@@ -885,7 +906,7 @@ class TossRuntimeStore(object):
             analysis.get("severity"),
             _json(analysis),
         ))
-        self.conn.commit()
+        self._commit()
         return 1
 
     def latest_tick_analysis(self, symbols=None):
@@ -939,6 +960,11 @@ class TossRuntimeStore(object):
 
 def _json(value):
     return json.dumps(sanitize_payload(value), ensure_ascii=False, default=str)
+
+
+def _is_locked_error(exc):
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
 
 
 def _payload_rows(payload):

@@ -43,6 +43,7 @@ def main(argv=None):
     parser.add_argument("--report-dir", default=os.path.join("toss_trading_runtime", "reports"))
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--max-tokens", type=int, default=1800)
+    parser.add_argument("--skip-evidence-save", action="store_true")
     parser.add_argument("--skip-env-file", action="store_true")
     args = parser.parse_args(argv)
 
@@ -83,11 +84,12 @@ def main(argv=None):
     evidence = attach_previous_analysis_context(evidence, previous_context)
     if not evidence.get("safe_for_analysis"):
         events = detect_events(evidence)
-        store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
-        try:
-            store.save_evidence(evidence, events=events)
-        finally:
-            store.close()
+        if not args.skip_evidence_save:
+            store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
+            try:
+                store.save_evidence(evidence, events=events)
+            finally:
+                store.close()
         report_path = _write_report(args.report_dir, {
             "status": "failed",
             "stage": "focused_evidence",
@@ -107,7 +109,8 @@ def main(argv=None):
     structured_comparison = compare_structured_to_previous(structured, previous_context)
     store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
     try:
-        store.save_evidence(evidence, events=events)
+        if not args.skip_evidence_save:
+            store.save_evidence(evidence, events=events)
         analysis_id = store.save_analysis_result(evidence, gpt, events=events)
         store.save_structured_analysis(analysis_id, structured)
         paper_candidates = store.create_paper_candidates(analysis_id, evidence)
@@ -127,6 +130,7 @@ def main(argv=None):
         "structured_comparison": structured_comparison,
         "db": {
             "path": db_path,
+            "evidence_saved": not args.skip_evidence_save,
             "paper_candidates_created": paper_candidates,
             "paper_candidates_evaluated": paper_evaluated,
         },

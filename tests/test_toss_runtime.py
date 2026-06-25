@@ -907,6 +907,81 @@ def test_historical_relationship_payload_uses_us_driver_kr_response():
         os.unlink(tmp.name)
 
 
+def test_relationship_evidence_includes_kiwoom_market_context():
+    toss_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    toss_tmp.close()
+    kiwoom_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    kiwoom_tmp.close()
+    store = TossRuntimeStore(db_path=toss_tmp.name)
+    conn = sqlite3.connect(kiwoom_tmp.name)
+    try:
+        conn.execute("""
+            CREATE TABLE market_context_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collected_at TEXT,
+                code TEXT,
+                section TEXT,
+                source TEXT,
+                reliability TEXT,
+                summary TEXT,
+                payload_json TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO market_context_snapshots (
+                collected_at, section, source, reliability, payload_json
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            "2026-06-24 15:19:21.432819",
+            "market_indices",
+            "OPT20001",
+            "unit_pending_validation",
+            json.dumps({"kospi_change_pct": 3.66, "kosdaq_change_pct": 1.92}),
+        ))
+        conn.execute("""
+            INSERT INTO market_context_snapshots (
+                collected_at, code, section, source, reliability, summary, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "2026-06-24 15:20:21.432819",
+            "000660",
+            "short_term_event_context",
+            "user_memo_ai_memory_supercycle_quant_context_20260625",
+            "user_supplied_unverified_event_context",
+            "Micron SCA/HBM catalyst context for SK Hynix.",
+            json.dumps({
+                "event_tags": [
+                    "EVENT_MICRON_SCA_SUPERCYCLE",
+                    "EVENT_HBM_SUPPLY_SHORTAGE",
+                ],
+                "bias": "bullish_high_sensitivity_but_gap_up_chase_risk",
+            }),
+        ))
+        conn.commit()
+
+        evidence = build_relationship_evidence(
+            store,
+            us_symbols=["NVDA"],
+            kiwoom_db_path=kiwoom_tmp.name,
+        )
+        context = evidence["kiwoom_market_context"]
+        assert context["status"] == "ok"
+        assert context["data_quality"]["latest_collected_at"] == "2026-06-24 15:20:21.432819"
+        assert context["sections"]["market_indices"][0]["payload"]["kospi_change_pct"] == 3.66
+        short_term = context["sections"]["short_term_event_context"][0]
+        assert short_term["code"] == "000660"
+        assert short_term["source"] == "user_memo_ai_memory_supercycle_quant_context_20260625"
+        assert short_term["payload"]["event_tags"] == [
+            "EVENT_MICRON_SCA_SUPERCYCLE",
+            "EVENT_HBM_SUPPLY_SHORTAGE",
+        ]
+    finally:
+        conn.close()
+        store.close()
+        os.unlink(toss_tmp.name)
+        os.unlink(kiwoom_tmp.name)
+
+
 def test_dashboard_window_symbol_persistence():
     tmp = tempfile.NamedTemporaryFile(delete=False)
     tmp.close()
@@ -1042,6 +1117,43 @@ def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
         os.unlink(tmp.name)
 
 
+def test_store_retries_transient_write_lock():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+    store = TossRuntimeStore(db_path=tmp.name)
+
+    class FlakyConnection(object):
+        def __init__(self, inner):
+            self.inner = inner
+            self.failed_once = False
+
+        def execute(self, query, params=()):
+            if not self.failed_once and "INSERT INTO event_logs" in query:
+                self.failed_once = True
+                raise sqlite3.OperationalError("database is locked")
+            return self.inner.execute(query, params)
+
+        def commit(self):
+            return self.inner.commit()
+
+        def close(self):
+            return self.inner.close()
+
+    try:
+        store.conn = FlakyConnection(store.conn)
+        store.save_event({
+            "symbol": "NVDA",
+            "event_type": "retry_probe",
+            "severity": "info",
+            "message": "transient lock should retry",
+        })
+        assert store.count_rows("event_logs") == 1
+        assert store.conn.failed_once
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     tests = [
         test_client_uses_read_only_endpoints_and_account_header,
@@ -1070,10 +1182,12 @@ if __name__ == "__main__":
         test_relationship_evidence_detects_strong_paired_relationship,
         test_relationship_evidence_reads_kiwoom_daily_gap_returns,
         test_historical_relationship_payload_uses_us_driver_kr_response,
+        test_relationship_evidence_includes_kiwoom_market_context,
         test_dashboard_window_symbol_persistence,
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,
         test_domestic_evidence_and_gpt_payload_use_imported_feedback,
+        test_store_retries_transient_write_lock,
     ]
     for test in tests:
         test()

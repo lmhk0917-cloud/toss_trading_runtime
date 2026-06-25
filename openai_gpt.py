@@ -130,6 +130,8 @@ class TossGptAnalyzer(object):
             "- If market_relationship exists, distinguish strong, weak, mixed, and insufficient_evidence regimes from the supplied paired_sample_count and correlation fields.\n"
             "- Never claim KR-US semiconductor correlation is strong when market_relationship.data_quality.warning is present.\n"
             "- Treat market_relationship.proxy_alignment as directional context only, not correlation proof.\n"
+            "- If market_relationship.kiwoom_market_context exists, use it as KOSPI/KOSDAQ/index futures/foreign-institution flow background for Korea-to-US risk appetite, but do not treat it as US order evidence.\n"
+            "- If market_relationship.kiwoom_market_context.sections.short_term_event_context exists, treat it as user-supplied short-term catalyst context only. Do not treat Micron/SCA/HBM event tags as proven correlation, and separate bullish catalyst interpretation from gap-up chase or profit-taking risk.\n"
             "- Use regression.beta, r_squared, hit_ratio_up, hit_ratio_down, and lead_score as sensitivity and directional reliability checks; do not rely on Pearson correlation alone.\n"
             "- If gap_effect.status is not_available, explicitly avoid claims about Korean open-gap or intraday reversal behavior.\n"
             "- If evidence is weak, lower INTEREST_SCORE and state hold/watch conditions.\n"
@@ -172,6 +174,7 @@ class TossGptAnalyzer(object):
             "- Do not make entry or exit decisions from GPT alone.\n"
             "- Use market_relationship to explain the US-to-next-KR loop only when paired observations support it.\n"
             "- If relationship_regime is insufficient_evidence, explicitly say the US/KR relationship is not proven for this window.\n"
+            "- If market_relationship.kiwoom_market_context.sections.short_term_event_context exists, use it as short-term Micron/SCA/HBM catalyst background only. It must not override weak imported feedback, missing live data, or insufficient relationship evidence.\n"
             "- Do not confuse proxy alignment with true rolling or lead-lag correlation.\n"
             "- Use regression.beta, r_squared, hit_ratio_up, hit_ratio_down, and lead_score to separate direction match from actual sensitivity.\n"
             "- If gap_effect.status is not_available, do not claim whether a US move was reflected at KR open or reversed intraday.\n"
@@ -206,9 +209,10 @@ class TossGptAnalyzer(object):
             method="POST",
         )
         delay = 2
+        timeout = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_SEC", "120"))
         for attempt in range(max_retries + 1):
             try:
-                with self.opener(request, timeout=45) as response:
+                with self.opener(request, timeout=timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except Exception as exc:
                 if attempt >= max_retries:

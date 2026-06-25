@@ -52,10 +52,25 @@ FOCUSED_NASDAQ_WATCHLIST = [
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
 
-KIWOOM_PERSONAL_DB_PATH = os.environ.get(
-    "KIWOOM_PERSONAL_DB_PATH",
+KIWOOM_DB_CANDIDATES = [
+    r"C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab\data\ticks.db",
     r"C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1\data\ticks.db",
-)
+    r"C:\Users\lmhk2\PycharmProjects\Kiwoom_Screening_Assistant\data\ticks.db",
+]
+
+
+def resolve_kiwoom_personal_db_path():
+    configured = os.environ.get("KIWOOM_PERSONAL_DB_PATH")
+    if configured:
+        return configured
+    existing = [path for path in KIWOOM_DB_CANDIDATES if os.path.exists(path)]
+    if not existing:
+        return KIWOOM_DB_CANDIDATES[0]
+    existing.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return existing[0]
+
+
+KIWOOM_PERSONAL_DB_PATH = resolve_kiwoom_personal_db_path()
 
 READ_ONLY_ENDPOINTS = set([
     "/api/v1/accounts",

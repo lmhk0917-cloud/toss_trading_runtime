@@ -10,12 +10,14 @@ import sqlite3
 import sys
 
 try:
+    from . import config
     from .store import TossRuntimeStore
 except ImportError:  # pragma: no cover
+    import config
     from store import TossRuntimeStore
 
 
-DEFAULT_KIWOOM_DB = r"C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1\data\ticks.db"
+DEFAULT_KIWOOM_DB = config.KIWOOM_PERSONAL_DB_PATH
 DEFAULT_CODES = ["005930", "000660"]
 SOURCE = "kiwoom_personal_ver1"
 
