@@ -13,6 +13,14 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_DOMESTIC_CODES = ("005930", "000660")
 DEFAULT_US_SYMBOLS = ("NVDA", "MU", "QQQ", "SOXX")
+SHARED_KIWOOM_SECTIONS = (
+    "market_indices",
+    "market_investor_flow",
+    "market_program_trading",
+    "derivatives",
+    "market_status",
+    "short_term_event_context",
+)
 
 
 def build_relationship_evidence(
@@ -27,7 +35,9 @@ def build_relationship_evidence(
     observations = store.relationship_observations(domestic_codes=domestic_codes, us_symbols=us_symbols)
     resolved_kiwoom_db_path = kiwoom_db_path or config.KIWOOM_PERSONAL_DB_PATH
     kiwoom_daily = load_kiwoom_daily_returns(resolved_kiwoom_db_path, domestic_codes)
-    kiwoom_market_context = load_latest_kiwoom_market_context(resolved_kiwoom_db_path)
+    kiwoom_market_context = load_latest_shared_kiwoom_market_context()
+    if kiwoom_market_context.get("status") in ("missing_db", "missing_table", "empty"):
+        kiwoom_market_context = load_latest_kiwoom_market_context(resolved_kiwoom_db_path)
     pair_results = _pair_results(observations, min_samples=min_samples, kiwoom_daily=kiwoom_daily)
     domestic_snapshot = store.domestic_snapshot(codes=domestic_codes)
     us_feedback = store.return_feedback_by_symbol()
@@ -69,8 +79,73 @@ def build_relationship_evidence(
             "Daily historical observations are not minute or tick evidence and must not be used for intraday timing.",
             "Proxy alignment is directional context, not correlation.",
             "Kiwoom market context is domestic market background; use it as KOSPI/KOSDAQ/flow context, not US execution evidence.",
+            "Prefer shared_context.db for Kiwoom context; direct Kiwoom DB reads are fallback only.",
             "When data_quality.warning is present, GPT must state that relationship strength is not proven.",
         ],
+    }
+
+
+def load_latest_shared_kiwoom_market_context(shared_db_path=None, sections=None):
+    shared_db_path = shared_db_path or getattr(config, "SHARED_CONTEXT_DB_PATH", None)
+    sections = sections or SHARED_KIWOOM_SECTIONS
+    if not shared_db_path or not os.path.exists(shared_db_path):
+        return {
+            "status": "missing_db",
+            "db_path": shared_db_path,
+            "sections": {},
+            "source_preference": "shared_context_db",
+        }
+    conn = sqlite3.connect(shared_db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _has_table(conn, "shared_context_snapshots"):
+            return {
+                "status": "missing_table",
+                "db_path": shared_db_path,
+                "sections": {},
+                "source_preference": "shared_context_db",
+            }
+        result = {}
+        latest_values = []
+        for section in sections:
+            rows = conn.execute("""
+                SELECT collected_at, symbol, section, source, status, payload_json
+                FROM shared_context_snapshots
+                WHERE source = 'kiwoom' AND section = ?
+                ORDER BY collected_at DESC, id DESC
+                LIMIT 3
+            """, (section,)).fetchall()
+            if rows:
+                result[section] = [_shared_market_context_row(row) for row in rows]
+                latest_values.extend(row["collected_at"] for row in rows if row["collected_at"])
+        return {
+            "status": "ok" if result else "empty",
+            "db_path": shared_db_path,
+            "generated_at": _now(),
+            "source_preference": "shared_context_db",
+            "sections": result,
+            "data_quality": {
+                "latest_collected_at": max(latest_values) if latest_values else None,
+                "section_count": len(result),
+                "warning": "Shared hub context is preferred; direct Kiwoom DB reads are fallback only.",
+            },
+        }
+    finally:
+        conn.close()
+
+
+def _shared_market_context_row(row):
+    payload = _parse_json(row["payload_json"])
+    body = payload.get("payload_json") or payload.get("payload") or payload
+    return {
+        "collected_at": row["collected_at"],
+        "code": row["symbol"],
+        "section": row["section"],
+        "source": row["source"],
+        "reliability": ((body or {}).get("reliability") if isinstance(body, dict) else None),
+        "summary": ((body or {}).get("summary") if isinstance(body, dict) else None),
+        "payload": body,
+        "shared_status": row["status"],
     }
 
 

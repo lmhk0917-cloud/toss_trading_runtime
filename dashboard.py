@@ -122,6 +122,7 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
         "gpt_sections": _gpt_sections_by_symbol((latest_gpt or {}).get("gpt_analysis"), symbols),
         "domestic": domestic_rows,
         "relationship": relationship,
+        "shared_context_status": _shared_context_status(),
         "domestic_latest_gpt": domestic_gpt,
         "domestic_gpt_sections": _gpt_sections_by_symbol((domestic_gpt or {}).get("gpt_analysis"), domestic_symbols or []),
         "latest_context": _latest_context(store),
@@ -142,6 +143,7 @@ def render_dashboard_html(snapshot):
     relationship_rows = "\n".join(_relationship_row(row) for row in ((snapshot.get("relationship") or {}).get("pairs") or []))
     context = snapshot.get("latest_context") or {}
     relationship = snapshot.get("relationship") or {}
+    shared_context = snapshot.get("shared_context_status") or {}
     table_cells = "\n".join(
         "<tr><td>{}</td><td>{}</td></tr>".format(_e(key), _e(value))
         for key, value in sorted(tables.items())
@@ -315,6 +317,16 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     </table>
   </section>
   <section>
+    <h2>Shared Context Hub</h2>
+    <div class="metrics">
+      <div class="metric"><div class="label">DB</div><div class="value">{shared_status}</div></div>
+      <div class="metric"><div class="label">Kiwoom</div><div class="value">{shared_kiwoom_time}</div></div>
+      <div class="metric"><div class="label">Toss</div><div class="value">{shared_toss_time}</div></div>
+      <div class="metric"><div class="label">Relationship</div><div class="value">{shared_relationship_time}</div></div>
+    </div>
+    <p class="meta">Path: {shared_db_path} | stale: {shared_stale} | missing: {shared_missing}</p>
+  </section>
+  <section>
     <h2>Latest Context</h2>
     <table><tbody>
       <tr><td>Collected</td><td>{context_time}</td></tr>
@@ -349,6 +361,13 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
         relationship_warning=_e(((relationship.get("data_quality") or {}).get("warning")) or ((relationship.get("data_quality") or {}).get("resolution_warning")) or "none"),
         relationship_proxy=_e("yes" if ((relationship.get("data_quality") or {}).get("uses_proxy_alignment")) else "no"),
         relationship_rows=relationship_rows,
+        shared_status=_e(shared_context.get("status") or "missing"),
+        shared_db_path=_e(shared_context.get("db_path") or ""),
+        shared_kiwoom_time=_e(shared_context.get("latest_kiwoom_context_time") or "none"),
+        shared_toss_time=_e(shared_context.get("latest_toss_context_time") or "none"),
+        shared_relationship_time=_e(shared_context.get("latest_relationship_context_time") or "none"),
+        shared_stale=_e(", ".join(shared_context.get("stale_sections") or []) or "none"),
+        shared_missing=_e(", ".join(shared_context.get("missing_sections") or []) or "none"),
         context_time=_e(context.get("collected_at") or ""),
         context_fx=_fmt(context.get("fx_rate"), decimals=4),
         context_us=_e(context.get("us_session") or ""),
@@ -517,6 +536,62 @@ def _relationship_resolution_label(relationship):
     if daily:
         return "mixed"
     return "live/intraday"
+
+
+def _shared_context_status():
+    db_path = getattr(config, "SHARED_CONTEXT_DB_PATH", "")
+    status = {
+        "db_path": db_path,
+        "status": "missing",
+        "latest_kiwoom_context_time": None,
+        "latest_toss_context_time": None,
+        "latest_relationship_context_time": None,
+        "stale_sections": [],
+        "missing_sections": [],
+    }
+    if not db_path or not os.path.exists(db_path):
+        status["missing_sections"] = ["shared_context.db"]
+        return status
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            quick = conn.execute("PRAGMA quick_check").fetchone()
+            if not quick or quick[0] != "ok":
+                status["status"] = "failed"
+                return status
+            if not _shared_has_table(conn, "shared_context_snapshots"):
+                status["status"] = "missing_table"
+                status["missing_sections"] = ["shared_context_snapshots"]
+                return status
+            status["latest_kiwoom_context_time"] = _shared_latest(conn, "source = 'kiwoom'")
+            status["latest_toss_context_time"] = _shared_latest(conn, "source = 'toss'")
+            status["latest_relationship_context_time"] = _shared_latest(conn, "section = 'relationship_metrics'")
+            for name, value in [
+                ("kiwoom", status["latest_kiwoom_context_time"]),
+                ("toss", status["latest_toss_context_time"]),
+                ("relationship", status["latest_relationship_context_time"]),
+            ]:
+                if not value:
+                    status["missing_sections"].append(name)
+            status["status"] = "ok" if not status["missing_sections"] else "partial"
+            return status
+        finally:
+            conn.close()
+    except Exception as exc:
+        status["status"] = "failed"
+        status["missing_sections"] = [str(exc)]
+        return status
+
+
+def _shared_has_table(conn, table):
+    return conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
+def _shared_latest(conn, where):
+    row = conn.execute("SELECT MAX(collected_at) AS latest FROM shared_context_snapshots WHERE {}".format(where)).fetchone()
+    return row["latest"] if row else None
 
 
 def _symbols_from_db(store):

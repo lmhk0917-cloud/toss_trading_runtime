@@ -72,6 +72,11 @@ def resolve_kiwoom_personal_db_path():
 
 KIWOOM_PERSONAL_DB_PATH = resolve_kiwoom_personal_db_path()
 
+SHARED_CONTEXT_DB_PATH = os.environ.get(
+    "SHARED_CONTEXT_DB_PATH",
+    r"C:\Users\lmhk2\Documents\New project\shared_market_context\shared_context.db",
+)
+
 READ_ONLY_ENDPOINTS = set([
     "/api/v1/accounts",
     "/api/v1/prices",

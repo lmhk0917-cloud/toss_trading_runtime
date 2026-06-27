@@ -24,7 +24,7 @@ from toss_trading_runtime.feedback import attach_feedback_adjustments, build_fee
 from toss_trading_runtime.market_calendar import current_kr_session, current_us_session
 from toss_trading_runtime.openai_gpt import TossGptAnalyzer, TossGptError
 from toss_trading_runtime.order_safety import TossOrderSafetyGate
-from toss_trading_runtime.relationship_analysis import build_relationship_evidence
+from toss_trading_runtime.relationship_analysis import build_relationship_evidence, load_latest_shared_kiwoom_market_context
 from toss_trading_runtime.runtime_health import build_runtime_health
 from toss_trading_runtime.screener import score_symbol
 from toss_trading_runtime.store import TossRuntimeStore
@@ -982,6 +982,69 @@ def test_relationship_evidence_includes_kiwoom_market_context():
         os.unlink(kiwoom_tmp.name)
 
 
+def test_relationship_evidence_reads_kiwoom_context_from_shared_hub_without_direct_db():
+    toss_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    toss_tmp.close()
+    shared_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    shared_tmp.close()
+    store = TossRuntimeStore(db_path=toss_tmp.name)
+    try:
+        shared_root = os.path.join(PROJECT_ROOT, "shared_market_context")
+        if shared_root not in sys.path:
+            sys.path.insert(0, shared_root)
+        from shared_context_store import SharedContextStore
+
+        shared = SharedContextStore(db_path=shared_tmp.name)
+        try:
+            shared.insert_snapshot(
+                "kiwoom",
+                "KR",
+                None,
+                "context",
+                "market_indices",
+                {"kospi_change_pct": 1.23, "summary": "shared hub context"},
+                collected_at="2026-06-26T09:00:05+09:00",
+                sample_count=1,
+            )
+            shared.insert_snapshot(
+                "kiwoom",
+                "KR",
+                "000660",
+                "context",
+                "short_term_event_context",
+                {"event_tags": ["EVENT_HBM"], "summary": "overlay only"},
+                collected_at="2026-06-26T09:01:05+09:00",
+                sample_count=1,
+            )
+        finally:
+            shared.close()
+
+        context = load_latest_shared_kiwoom_market_context(shared_db_path=shared_tmp.name)
+        assert context["status"] == "ok"
+        assert context["source_preference"] == "shared_context_db"
+        assert context["sections"]["market_indices"][0]["payload"]["kospi_change_pct"] == 1.23
+
+        import toss_trading_runtime.config as config
+        previous = config.SHARED_CONTEXT_DB_PATH
+        config.SHARED_CONTEXT_DB_PATH = shared_tmp.name
+        try:
+            evidence = build_relationship_evidence(
+                store,
+                domestic_codes=["005930"],
+                us_symbols=["NVDA"],
+                min_samples=3,
+                kiwoom_db_path="missing-direct-kiwoom.db",
+            )
+        finally:
+            config.SHARED_CONTEXT_DB_PATH = previous
+        assert evidence["kiwoom_market_context"]["status"] == "ok"
+        assert evidence["kiwoom_market_context"]["sections"]["short_term_event_context"][0]["payload"]["event_tags"] == ["EVENT_HBM"]
+    finally:
+        store.close()
+        os.unlink(toss_tmp.name)
+        os.unlink(shared_tmp.name)
+
+
 def test_dashboard_window_symbol_persistence():
     tmp = tempfile.NamedTemporaryFile(delete=False)
     tmp.close()
@@ -1183,6 +1246,7 @@ if __name__ == "__main__":
         test_relationship_evidence_reads_kiwoom_daily_gap_returns,
         test_historical_relationship_payload_uses_us_driver_kr_response,
         test_relationship_evidence_includes_kiwoom_market_context,
+        test_relationship_evidence_reads_kiwoom_context_from_shared_hub_without_direct_db,
         test_dashboard_window_symbol_persistence,
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,
