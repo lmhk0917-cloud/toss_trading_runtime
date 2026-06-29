@@ -1034,6 +1034,7 @@ def test_relationship_evidence_reads_kiwoom_context_from_shared_hub_without_dire
                 us_symbols=["NVDA"],
                 min_samples=3,
                 kiwoom_db_path="missing-direct-kiwoom.db",
+                shared_context_db_path=shared_tmp.name,
             )
         finally:
             config.SHARED_CONTEXT_DB_PATH = previous

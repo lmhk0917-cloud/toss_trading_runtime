@@ -49,4 +49,5 @@ foreach ($proc in $runtimeProcesses) {
 & $Python -m toss_trading_runtime.dashboard --symbols $Symbols --html (Join-Path $ReportsDir "dashboard_latest.html") *>> $postLog
 & $Python -m toss_trading_runtime.ops_report --html (Join-Path $ReportsDir "ops_latest.html") *>> $postLog
 & $Python -m toss_trading_runtime.post_close_review --symbols $Symbols *>> $postLog
+& $Python -m toss_trading_runtime.export_to_shared_context *>> $postLog
 "POST_CLOSE_FINALIZE_FINISHED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $postLog -Append -Encoding utf8

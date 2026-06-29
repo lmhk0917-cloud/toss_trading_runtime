@@ -32,9 +32,11 @@ def main(argv=None):
     db_path = os.environ.get("TOSS_RUNTIME_DB_PATH") or os.path.join(PROJECT_ROOT, "toss_runtime.db")
     shared_db = os.environ.get("SHARED_CONTEXT_DB_PATH") or DEFAULT_SHARED_DB
     rows = export_to_shared_context(db_path=db_path, shared_db=shared_db)
+    json_status = refresh_latest_json(shared_db)
     print("TOSS_SHARED_CONTEXT_EXPORT_STATUS=ok")
     print("TOSS_SHARED_CONTEXT_EXPORT_ROWS={}".format(rows))
     print("TOSS_SHARED_CONTEXT_DB={}".format(shared_db))
+    print("TOSS_SHARED_CONTEXT_JSON_EXPORT_STATUS={}".format(json_status))
     return 0
 
 
@@ -219,6 +221,17 @@ def _parse_json(value):
 
 def _now():
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def refresh_latest_json(shared_db):
+    try:
+        from export_latest_json import export_all
+
+        export_all(db_path=shared_db)
+        return "ok"
+    except Exception as exc:
+        print("TOSS_SHARED_CONTEXT_JSON_EXPORT_ERROR={}".format(exc))
+        return "failed"
 
 
 if __name__ == "__main__":

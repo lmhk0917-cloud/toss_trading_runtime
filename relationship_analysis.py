@@ -29,14 +29,18 @@ def build_relationship_evidence(
     us_symbols=None,
     min_samples=5,
     kiwoom_db_path=None,
+    shared_context_db_path=None,
 ):
     domestic_codes = [str(item).strip() for item in domestic_codes or DEFAULT_DOMESTIC_CODES if str(item).strip()]
     us_symbols = [str(item).strip().upper() for item in us_symbols or DEFAULT_US_SYMBOLS if str(item).strip()]
     observations = store.relationship_observations(domestic_codes=domestic_codes, us_symbols=us_symbols)
     resolved_kiwoom_db_path = kiwoom_db_path or config.KIWOOM_PERSONAL_DB_PATH
     kiwoom_daily = load_kiwoom_daily_returns(resolved_kiwoom_db_path, domestic_codes)
-    kiwoom_market_context = load_latest_shared_kiwoom_market_context()
-    if kiwoom_market_context.get("status") in ("missing_db", "missing_table", "empty"):
+    if shared_context_db_path is not None or kiwoom_db_path is None:
+        kiwoom_market_context = load_latest_shared_kiwoom_market_context(shared_db_path=shared_context_db_path)
+    else:
+        kiwoom_market_context = {"status": "explicit_direct_db"}
+    if kiwoom_market_context.get("status") in ("missing_db", "missing_table", "empty", "explicit_direct_db"):
         kiwoom_market_context = load_latest_kiwoom_market_context(resolved_kiwoom_db_path)
     pair_results = _pair_results(observations, min_samples=min_samples, kiwoom_daily=kiwoom_daily)
     domestic_snapshot = store.domestic_snapshot(codes=domestic_codes)
