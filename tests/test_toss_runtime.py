@@ -210,6 +210,160 @@ def test_gpt_analyzer_sanitizes_prompt_and_returns_analysis():
     assert "secret-token" not in opener.body
 
 
+def test_focused_gpt_payload_uses_quality_preserving_compact_evidence():
+    class FakeFocusedOpenAi(object):
+        def __init__(self):
+            self.body = None
+
+        def __call__(self, request, timeout=45):
+            self.body = request.data.decode("utf-8")
+            return FakeResponse({
+                "model": "gpt-4o-mini-test",
+                "choices": [{"message": {"content": "SYMBOL: AAPL\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\nanalysis"}}],
+                "usage": {"total_tokens": 20},
+            })
+
+    opener = FakeFocusedOpenAi()
+    analyzer = TossGptAnalyzer(api_key="sk-test", opener=opener)
+    evidence = {
+        "mode": "focused_watchlist",
+        "broker": "tossinvest",
+        "collected_at": "2026-06-16 22:31:00.000000",
+        "symbols": ["AAPL"],
+        "accounts": {"result": [{"accountSeq": "123456789", "nickname": "primary"}]},
+        "holdings": {"result": [{"accountSeq": "123456789", "symbol": "AAPL", "quantity": 1}]},
+        "prices": {"result": [{"symbol": "AAPL", "lastPrice": "102", "unusedRawField": "raw-noise"}]},
+        "exchange_rate": {"result": {"baseCurrency": "USD", "quoteCurrency": "KRW", "rate": "1380.0"}},
+        "sessions": {"US": {"session": "regularMarket"}},
+        "data_quality": {"safe_for_analysis": True},
+        "shared_context_status": {
+            "status": "partial",
+            "db_path": r"C:\Users\lmhk2\Documents\New project\shared_market_context\shared_context.db",
+            "latest_kiwoom_context_time": "2026-06-30T09:05:00+09:00",
+            "latest_toss_context_time": "2026-06-30T05:01:00+09:00",
+            "latest_relationship_context_time": "2026-06-30T05:02:00+09:00",
+            "stale_sections": ["latest_relationship_context"],
+            "missing_sections": ["gap_effect"],
+            "relationship_regime": "insufficient_evidence",
+            "paired_sample_count": 12,
+            "intraday_timing_allowed": False,
+            "raw_noise": "do-not-include",
+        },
+        "symbol_evidence": {
+            "AAPL": {
+                "symbol": "AAPL",
+                "price": {"symbol": "AAPL", "lastPrice": "102", "unusedRawField": "raw-noise"},
+                "minute_candles_summary": {"sample": 120, "change_pct": 1.2},
+                "daily_candles_summary": {"sample": 60, "change_pct": 2.4},
+                "feedback_adjustment": {"samples": 4, "avg_return_pct": 0.3, "score_adjustment": 8},
+                "previous_analysis": {"previous_decision": "OBSERVE", "previous_interest_score": 45},
+            }
+        },
+        "paper_feedback_summary": [{"symbol": "AAPL", "horizon_min": 60, "avg_return_pct": 0.3, "count": 4}],
+        "market_relationship": {
+            "relationship_regime": "insufficient_evidence",
+            "data_quality": {"warning": "insufficient paired KR-US observations; do not claim correlation strength"},
+            "pairs": [],
+        },
+    }
+
+    result = analyzer.analyze_focused_evidence(evidence, ["AAPL"])
+
+    assert "SYMBOL: AAPL" in result["analysis"]
+    assert "quality_preserving_compact_v1" in opener.body
+    assert "minute_candles_summary" in opener.body
+    assert "feedback_adjustment" in opener.body
+    assert "previous_analysis" in opener.body
+    assert "insufficient paired KR-US observations" in opener.body
+    assert "GPT_STRUCTURED_JSON" in opener.body
+    assert "shared_context_freshness" in opener.body
+    assert "latest_kiwoom_context_time" in opener.body
+    assert "latest_toss_context_time" in opener.body
+    assert "latest_relationship_context_time" in opener.body
+    assert "stale_sections" in opener.body
+    assert "missing_sections" in opener.body
+    assert "data_freshness" in opener.body
+    assert "intraday_timing_allowed" in opener.body
+    assert "do-not-include" not in opener.body
+    assert "123456789" not in opener.body
+    assert "unusedRawField" not in opener.body
+
+
+def test_toss_gpt_prompts_include_shared_freshness_and_json_contract():
+    analyzer = TossGptAnalyzer(api_key="sk-test", opener=FakeOpener())
+    focused_payload = analyzer._build_focused_payload({
+        "symbols": ["NVDA"],
+        "shared_context_status": {
+            "status": "stale",
+            "latest_kiwoom_context_time": "2026-06-30T09:00:00+09:00",
+            "latest_toss_context_time": "2026-06-30T05:00:00+09:00",
+            "latest_relationship_context_time": "2026-06-30T05:01:00+09:00",
+            "stale_sections": ["kiwoom"],
+            "missing_sections": [],
+        },
+    }, symbols=["NVDA"])
+    domestic_payload = analyzer._build_domestic_payload({
+        "symbols": ["005930"],
+        "shared_context_status": {
+            "status": "missing",
+            "missing_sections": ["shared_context.db"],
+        },
+    }, symbols=["005930"])
+
+    for payload in (focused_payload, domestic_payload):
+        user_prompt = payload["messages"][1]["content"]
+        assert "GPT_STRUCTURED_JSON" in user_prompt
+        assert "shared_context_freshness" in user_prompt
+        assert "latest_kiwoom_context_time" in user_prompt
+        assert "latest_toss_context_time" in user_prompt
+        assert "latest_relationship_context_time" in user_prompt
+        assert "stale_sections" in user_prompt
+        assert "missing_sections" in user_prompt
+        assert "data_freshness" in user_prompt
+        assert "shared_context_status.status is missing, stale, partial" in user_prompt
+
+
+def test_structured_analysis_extracts_gpt_structured_json_block():
+    text = """
+SYMBOL: MU
+DECISION: WATCH
+INTEREST_SCORE: 45
+RISK_LEVEL: MEDIUM
+CONFIDENCE: LOW
+
+GPT_STRUCTURED_JSON:
+{"symbols":[{"symbol":"MU","decision":"RISK","interest_score":37,"risk_level":"HIGH","confidence":"LOW","relationship_regime":"insufficient_evidence","data_freshness":"stale","summary":"공유허브 relationship stale로 보수 판단","risk_flags":["stale relationship"],"next_checks":["fresh shared hub"]}],"shared_context_freshness":{"latest_kiwoom_context_time":"2026-06-30T09:00:00+09:00","latest_toss_context_time":"2026-06-30T05:00:00+09:00","latest_relationship_context_time":"2026-06-29T05:00:00+09:00","stale_sections":["relationship"],"missing_sections":[]}}
+"""
+    structured = extract_structured_analysis(text, ["MU"])
+    assert structured[0]["symbol"] == "MU"
+    assert structured[0]["final_decision"] == "RISK"
+    assert structured[0]["interest_score"] == 37
+    assert structured[0]["risk_level"] == "HIGH"
+    assert structured[0]["confidence"] == "LOW"
+    assert "공유허브" in structured[0]["summary"]
+
+
+def test_structured_analysis_extracts_json_only_mock_gpt_result():
+    text = json.dumps({
+        "symbols": [{
+            "symbol": "NVDA",
+            "decision": "OBSERVE",
+            "interest_score": 61,
+            "risk_level": "MEDIUM",
+            "confidence": "MEDIUM",
+            "relationship_regime": "weak",
+            "data_freshness": "fresh",
+            "summary": "JSON-only mock response remains parseable.",
+        }],
+    })
+    structured = extract_structured_analysis(text, ["NVDA"])
+    assert structured[0]["final_decision"] == "OBSERVE"
+    assert structured[0]["interest_score"] == 61
+    assert structured[0]["risk_level"] == "MEDIUM"
+    assert structured[0]["confidence"] == "MEDIUM"
+    assert structured[0]["valid"]
+
+
 def test_market_session_helpers_detect_us_premarket_and_kr_nxt():
     us = {"result": {"today": {
         "preMarket": {"startTime": "2026-06-16T17:00:00+09:00", "endTime": "2026-06-16T22:30:00+09:00"},
@@ -391,6 +545,104 @@ def test_events_and_store_persist_focused_evidence():
         assert latest["AAPL"]["final_decision"] == "WATCH"
         summary = store.operational_summary()
         assert summary["tables"]["price_snapshots"] == 1
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_paper_candidate_close_price_fallback_evaluates_after_final_price():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        store.conn.execute("""
+            INSERT INTO price_snapshots (
+                collected_at, symbol, price, currency, source_timestamp, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "2026-06-16 05:00:00.000000",
+            "AAPL",
+            101.0,
+            "USD",
+            "2026-06-16T05:00:00+09:00",
+            "{}",
+        ))
+        store.conn.execute("""
+            INSERT INTO paper_trade_candidates (
+                created_at, analysis_id, symbol, anchor_price, horizon_min,
+                due_at, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "2026-06-16 04:59:30.000000",
+            1,
+            "AAPL",
+            100.0,
+            5,
+            "2026-06-16 05:04:30.000000",
+            "pending",
+            "{}",
+        ))
+        store.conn.commit()
+
+        assert store.evaluate_due_paper_candidates(close_price_fallback=False) == 0
+        assert store.evaluate_due_paper_candidates(close_price_fallback=True) == 1
+        row = store.conn.execute("""
+            SELECT status, result_return_pct, outcome
+            FROM paper_trade_candidates
+            LIMIT 1
+        """).fetchone()
+        assert row["status"] == "evaluated"
+        assert row["result_return_pct"] == 1.0
+        assert row["outcome"] == "win"
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_paper_candidate_post_close_can_evaluate_future_due_with_final_price():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        store.conn.execute("""
+            INSERT INTO price_snapshots (
+                collected_at, symbol, price, currency, source_timestamp, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "2026-06-16 05:00:00.000000",
+            "AAPL",
+            99.0,
+            "USD",
+            "2026-06-16T05:00:00+09:00",
+            "{}",
+        ))
+        store.conn.execute("""
+            INSERT INTO paper_trade_candidates (
+                created_at, analysis_id, symbol, anchor_price, horizon_min,
+                due_at, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "2026-06-16 05:00:00.000000",
+            1,
+            "AAPL",
+            100.0,
+            60,
+            "2099-01-01 06:00:00.000000",
+            "pending",
+            "{}",
+        ))
+        store.conn.commit()
+
+        assert store.evaluate_due_paper_candidates(close_price_fallback=True, include_future_due=False) == 0
+        assert store.evaluate_due_paper_candidates(close_price_fallback=True, include_future_due=True) == 1
+        row = store.conn.execute("""
+            SELECT status, result_return_pct, outcome
+            FROM paper_trade_candidates
+            LIMIT 1
+        """).fetchone()
+        assert row["status"] == "evaluated"
+        assert row["result_return_pct"] == -1.0
+        assert row["outcome"] == "loss"
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -1226,6 +1478,10 @@ if __name__ == "__main__":
         test_order_safety_warns_when_kiwoom_runtime_active,
         test_gpt_analyzer_blocks_without_key,
         test_gpt_analyzer_sanitizes_prompt_and_returns_analysis,
+        test_focused_gpt_payload_uses_quality_preserving_compact_evidence,
+        test_toss_gpt_prompts_include_shared_freshness_and_json_contract,
+        test_structured_analysis_extracts_gpt_structured_json_block,
+        test_structured_analysis_extracts_json_only_mock_gpt_result,
         test_market_session_helpers_detect_us_premarket_and_kr_nxt,
         test_us_session_infers_kst_overnight_regular_market,
         test_score_symbol_ranks_momentum_and_volume,
@@ -1234,6 +1490,8 @@ if __name__ == "__main__":
         test_focused_evidence_allows_noncritical_calendar_gap,
         test_summarize_candles_returns_personal_style_inputs,
         test_events_and_store_persist_focused_evidence,
+        test_paper_candidate_close_price_fallback_evaluates_after_final_price,
+        test_paper_candidate_post_close_can_evaluate_future_due_with_final_price,
         test_trade_ticks_orderbook_analysis_and_collector_persist,
         test_tick_collector_iteration_uses_read_only_tick_endpoints,
         test_feedback_adjustments_attach_to_evidence,

@@ -1,5 +1,6 @@
 """Best-effort structured extraction from GPT focused reports."""
 
+import json
 import re
 
 
@@ -9,8 +10,13 @@ LEVELS = ["LOW", "MEDIUM", "HIGH"]
 
 def extract_structured_analysis(text, symbols):
     text = text or ""
+    json_by_symbol = _extract_json_symbol_map(text)
     results = []
     for symbol in symbols or []:
+        json_item = json_by_symbol.get(str(symbol).upper())
+        if json_item:
+            results.append(_structured_from_json_item(symbol, json_item))
+            continue
         section = _section_for_symbol(text, symbol)
         results.append({
             "symbol": symbol,
@@ -22,6 +28,96 @@ def extract_structured_analysis(text, symbols):
             "valid": bool(section.strip()),
         })
     return results
+
+
+def _structured_from_json_item(symbol, item):
+    return {
+        "symbol": symbol,
+        "final_decision": _normalize_choice(
+            item.get("decision") or item.get("final_decision"),
+            DECISIONS,
+            "unknown",
+        ),
+        "interest_score": _normalize_score(item.get("interest_score") or item.get("score")),
+        "risk_level": _normalize_choice(item.get("risk_level"), LEVELS, "unknown"),
+        "confidence": _normalize_choice(item.get("confidence"), LEVELS, "unknown"),
+        "summary": _compact(item.get("summary") or item.get("rationale") or json.dumps(item, ensure_ascii=False)),
+        "valid": True,
+    }
+
+
+def _extract_json_symbol_map(text):
+    payload = _extract_structured_json_payload(text)
+    rows = []
+    if isinstance(payload, dict):
+        rows = payload.get("symbols") or payload.get("items") or payload.get("analysis") or []
+    elif isinstance(payload, list):
+        rows = payload
+    result = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or row.get("ticker") or row.get("code") or "").upper()
+        if symbol and symbol not in result:
+            result[symbol] = row
+    return result
+
+
+def _extract_structured_json_payload(text):
+    text = text or ""
+    candidates = []
+    marker_match = re.search(r"GPT_STRUCTURED_JSON\s*:?", text, flags=re.IGNORECASE)
+    if marker_match:
+        candidates.extend(_json_candidates_from(text[marker_match.end():]))
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        candidates.append(stripped)
+    candidates.extend(_json_candidates_from(text))
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _json_candidates_from(text):
+    candidates = []
+    for start, opener, closer in (
+        (text.find("{"), "{", "}"),
+        (text.find("["), "[", "]"),
+    ):
+        if start < 0:
+            continue
+        end = _matching_json_end(text, start, opener, closer)
+        if end is not None:
+            candidates.append(text[start:end + 1])
+    return candidates
+
+
+def _matching_json_end(text, start, opener, closer):
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
 
 
 def _section_for_symbol(text, symbol):
@@ -77,7 +173,7 @@ def _find_score(section):
         match = re.search(pattern, section, flags=re.IGNORECASE)
         if match:
             value = int(match.group(1))
-            return max(0, min(100, value))
+            return _normalize_score(value)
     return None
 
 
@@ -96,3 +192,16 @@ def _compact(section, limit=600):
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+
+
+def _normalize_choice(value, allowed, default):
+    value = str(value or "").upper()
+    return value if value in allowed else default
+
+
+def _normalize_score(value):
+    try:
+        value = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, value))

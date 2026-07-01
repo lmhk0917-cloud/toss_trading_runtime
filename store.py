@@ -392,13 +392,20 @@ class TossRuntimeStore(object):
         self._commit()
         return created
 
-    def evaluate_due_paper_candidates(self):
+    def evaluate_due_paper_candidates(self, close_price_fallback=False, include_future_due=False):
         now = _now()
-        rows = self.conn.execute("""
-            SELECT * FROM paper_trade_candidates
-            WHERE status = 'pending' AND due_at <= ?
-            ORDER BY due_at ASC
-        """, (now,)).fetchall()
+        if include_future_due:
+            rows = self.conn.execute("""
+                SELECT * FROM paper_trade_candidates
+                WHERE status = 'pending'
+                ORDER BY due_at ASC
+            """).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT * FROM paper_trade_candidates
+                WHERE status = 'pending' AND due_at <= ?
+                ORDER BY due_at ASC
+            """, (now,)).fetchall()
         evaluated = 0
         for row in rows:
             latest = self.conn.execute("""
@@ -407,6 +414,13 @@ class TossRuntimeStore(object):
                 ORDER BY collected_at DESC
                 LIMIT 1
             """, (row["symbol"], row["due_at"])).fetchone()
+            if not latest and close_price_fallback:
+                latest = self.conn.execute("""
+                    SELECT price FROM price_snapshots
+                    WHERE symbol = ? AND collected_at <= ?
+                    ORDER BY collected_at DESC
+                    LIMIT 1
+                """, (row["symbol"], now)).fetchone()
             if not latest:
                 continue
             latest_price = _to_float(latest["price"])
