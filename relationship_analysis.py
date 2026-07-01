@@ -544,12 +544,28 @@ def load_kiwoom_daily_returns(db_path, codes=None):
         result = {}
         for code in codes:
             rows = conn.execute("""
-                SELECT id, code, price, open_price, received_at
-                FROM ticks
-                WHERE code = ? AND price IS NOT NULL AND received_at IS NOT NULL
-                ORDER BY received_at ASC, id ASC
-            """, (code,)).fetchall()
-            result[code] = _daily_returns_from_ticks(rows)
+                WITH day_bounds AS (
+                    SELECT
+                        substr(received_at, 1, 10) AS date_key,
+                        MIN(id) AS first_id,
+                        MAX(id) AS last_id
+                    FROM ticks
+                    WHERE code = ?
+                      AND price IS NOT NULL
+                      AND received_at IS NOT NULL
+                    GROUP BY substr(received_at, 1, 10)
+                )
+                SELECT
+                    d.date_key,
+                    f.open_price AS open_price,
+                    f.price AS first_price,
+                    l.price AS close_price
+                FROM day_bounds d
+                JOIN ticks f ON f.id = d.first_id
+                JOIN ticks l ON l.id = d.last_id
+                ORDER BY d.date_key ASC
+            """, (code,))
+            result[code] = _daily_returns_from_daily_bounds(rows)
         return result
     finally:
         conn.close()
@@ -642,6 +658,28 @@ def _daily_returns_from_ticks(rows):
         last = day_rows[-1]
         open_price = _to_float(first["open_price"]) or _to_float(first["price"])
         close_price = _to_float(last["price"])
+        if previous_close and open_price and close_price:
+            result[date_key] = {
+                "date": date_key,
+                "open_price": open_price,
+                "close_price": close_price,
+                "previous_close": previous_close,
+                "open_return_pct": round((open_price - previous_close) / previous_close * 100, 4),
+                "close_return_pct": round((close_price - previous_close) / previous_close * 100, 4),
+                "intraday_return_pct": round((close_price - open_price) / open_price * 100, 4),
+            }
+        if close_price:
+            previous_close = close_price
+    return result
+
+
+def _daily_returns_from_daily_bounds(rows):
+    result = {}
+    previous_close = None
+    for row in rows:
+        date_key = row["date_key"]
+        open_price = _to_float(row["open_price"]) or _to_float(row["first_price"])
+        close_price = _to_float(row["close_price"])
         if previous_close and open_price and close_price:
             result[date_key] = {
                 "date": date_key,
