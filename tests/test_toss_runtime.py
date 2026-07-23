@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import sqlite3
 import sys
@@ -15,6 +15,7 @@ from toss_trading_runtime.client import TossInvestClient, TossInvestClientError
 from toss_trading_runtime.analysis_history import attach_previous_analysis_context, build_previous_analysis_context, compare_structured_to_previous
 from toss_trading_runtime.dashboard import build_dashboard_snapshot, format_summary_text, render_dashboard_html
 from toss_trading_runtime.dashboard_window import load_symbols, save_symbols, save_watchlist_file
+from toss_trading_runtime.decision_calibration import calibrate_structured_analysis
 from toss_trading_runtime.domestic_analysis import collect_domestic_evidence
 from toss_trading_runtime.domestic_import import load_kiwoom_summaries
 from toss_trading_runtime.evidence import collect_read_only_evidence
@@ -24,6 +25,7 @@ from toss_trading_runtime.feedback import attach_feedback_adjustments, build_fee
 from toss_trading_runtime.market_calendar import current_kr_session, current_us_session
 from toss_trading_runtime.openai_gpt import TossGptAnalyzer, TossGptError
 from toss_trading_runtime.order_safety import TossOrderSafetyGate
+from toss_trading_runtime.quant_feedback import attach_quant_feedback_to_evidence, build_quant_feedback_snapshot, compact_quant_feedback
 from toss_trading_runtime.relationship_analysis import build_relationship_evidence, load_latest_shared_kiwoom_market_context
 from toss_trading_runtime.runtime_health import build_runtime_health
 from toss_trading_runtime.screener import score_symbol
@@ -194,7 +196,7 @@ def test_gpt_analyzer_sanitizes_prompt_and_returns_analysis():
             self.body = request.data.decode("utf-8")
             return FakeResponse({
                 "model": "gpt-4o-mini-test",
-                "choices": [{"message": {"content": "분석 결과"}}],
+                "choices": [{"message": {"content": "遺꾩꽍 寃곌낵"}}],
                 "usage": {"total_tokens": 10},
             })
 
@@ -205,7 +207,7 @@ def test_gpt_analyzer_sanitizes_prompt_and_returns_analysis():
         "accountSeq": "123456789",
         "access_token": "secret-token",
     })
-    assert result["analysis"] == "분석 결과"
+    assert result["analysis"] == "遺꾩꽍 寃곌낵"
     assert "123456789" not in opener.body
     assert "secret-token" not in opener.body
 
@@ -332,7 +334,7 @@ RISK_LEVEL: MEDIUM
 CONFIDENCE: LOW
 
 GPT_STRUCTURED_JSON:
-{"symbols":[{"symbol":"MU","decision":"RISK","interest_score":37,"risk_level":"HIGH","confidence":"LOW","relationship_regime":"insufficient_evidence","data_freshness":"stale","summary":"공유허브 relationship stale로 보수 판단","risk_flags":["stale relationship"],"next_checks":["fresh shared hub"]}],"shared_context_freshness":{"latest_kiwoom_context_time":"2026-06-30T09:00:00+09:00","latest_toss_context_time":"2026-06-30T05:00:00+09:00","latest_relationship_context_time":"2026-06-29T05:00:00+09:00","stale_sections":["relationship"],"missing_sections":[]}}
+{"symbols":[{"symbol":"MU","decision":"RISK","interest_score":37,"risk_level":"HIGH","confidence":"LOW","relationship_regime":"insufficient_evidence","data_freshness":"stale","summary":"怨듭쑀?덈툕 relationship stale濡?蹂댁닔 ?먮떒","risk_flags":["stale relationship"],"next_checks":["fresh shared hub"]}],"shared_context_freshness":{"latest_kiwoom_context_time":"2026-06-30T09:00:00+09:00","latest_toss_context_time":"2026-06-30T05:00:00+09:00","latest_relationship_context_time":"2026-06-29T05:00:00+09:00","stale_sections":["relationship"],"missing_sections":[]}}
 """
     structured = extract_structured_analysis(text, ["MU"])
     assert structured[0]["symbol"] == "MU"
@@ -340,7 +342,7 @@ GPT_STRUCTURED_JSON:
     assert structured[0]["interest_score"] == 37
     assert structured[0]["risk_level"] == "HIGH"
     assert structured[0]["confidence"] == "LOW"
-    assert "공유허브" in structured[0]["summary"]
+    assert "怨듭쑀?덈툕" in structured[0]["summary"]
 
 
 def test_structured_analysis_extracts_json_only_mock_gpt_result():
@@ -725,6 +727,152 @@ def test_feedback_adjustments_attach_to_evidence():
     assert evidence["symbol_evidence"]["AAPL"]["feedback_adjustment"]["samples"] == 3
     assert evidence["symbol_evidence"]["NVDA"]["feedback_adjustment"]["samples"] == 0
 
+
+def test_decision_calibration_lowers_score_on_weak_numeric_feedback():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "WATCH",
+        "interest_score": 72,
+        "risk_level": "LOW",
+        "confidence": "HIGH",
+        "summary": "GPT liked momentum.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "partial", "stale_sections": ["relationship"], "missing_sections": []},
+        "market_relationship": {
+            "relationship_regime": "insufficient_evidence",
+            "data_quality": {"warning": "not enough paired observations"},
+        },
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {
+                    "samples": 6,
+                    "avg_return_pct": -0.22,
+                    "win_rate": 0.33,
+                    "worst_path_return_pct": -0.85,
+                    "score_adjustment": -8,
+                },
+                "quant_feedback_guidance": {"label": "negative_expectancy", "sample_count": 6},
+                "quant_feedback": {
+                    "evaluated_count": 6,
+                    "expectancy_pct": -0.2,
+                    "adverse_path_rate_pct": 66.7,
+                },
+                "minute_candles_summary": {
+                    "change_pct": -1.4,
+                    "volume_ratio": 1.8,
+                    "rsi14": 31,
+                    "vwap_distance_pct": -0.7,
+                },
+                "daily_candles_summary": {
+                    "change_pct": -2.3,
+                    "ma5_vs_ma20_pct": -1.2,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["interest_score"] < 40
+    assert calibrated["final_decision"] == "RISK"
+    assert calibrated["risk_level"] == "HIGH"
+    assert calibrated["confidence"] in ("LOW", "MEDIUM")
+    assert calibrated["calibration"]["score_delta"] < 0
+    assert "RISK" in calibrated["summary"]
+    assert "사후 피드백" in calibrated["summary"]
+    assert "다음 확인" in calibrated["summary"]
+    assert "\n- 판단:" in calibrated["summary"]
+    assert "\n- 수치:" in calibrated["summary"]
+
+
+def test_decision_calibration_can_raise_score_on_confirmed_positive_numbers():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "OBSERVE",
+        "interest_score": 62,
+        "risk_level": "MEDIUM",
+        "confidence": "MEDIUM",
+        "summary": "GPT was cautious.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "ok", "stale_sections": [], "missing_sections": []},
+        "market_relationship": {"relationship_regime": "strong", "data_quality": {}},
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {
+                    "samples": 8,
+                    "avg_return_pct": 0.24,
+                    "win_rate": 0.63,
+                    "worst_path_return_pct": -0.15,
+                    "score_adjustment": 8,
+                },
+                "quant_feedback_guidance": {"label": "positive_expectancy", "sample_count": 8},
+                "quant_feedback": {
+                    "evaluated_count": 8,
+                    "expectancy_pct": 0.19,
+                    "adverse_path_rate_pct": 12.5,
+                },
+                "minute_candles_summary": {
+                    "change_pct": 1.3,
+                    "volume_ratio": 2.1,
+                    "rsi14": 61,
+                    "vwap_distance_pct": 0.3,
+                },
+                "daily_candles_summary": {
+                    "change_pct": 2.4,
+                    "ma5_vs_ma20_pct": 0.8,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["interest_score"] >= 70
+    assert calibrated["final_decision"] == "WATCH"
+    assert calibrated["calibration"]["score_delta"] > 0
+
+
+
+def test_decision_calibration_softens_gpt_avoid_without_severe_numeric_risk():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "AVOID",
+        "interest_score": 20,
+        "risk_level": "HIGH",
+        "confidence": "LOW",
+        "summary": "GPT overgeneralized a cautious market.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "partial", "stale_sections": ["relationship"], "missing_sections": []},
+        "market_relationship": {"relationship_regime": "insufficient_evidence", "data_quality": {"warning": "weak relationship"}},
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {"samples": 0, "score_adjustment": 0},
+                "quant_feedback_guidance": {"label": "sample_too_small", "sample_count": 0},
+                "quant_feedback": {"evaluated_count": 0},
+                "minute_candles_summary": {
+                    "change_pct": 1.6,
+                    "volume_ratio": 0.6,
+                    "rsi14": 58,
+                    "vwap_distance_pct": 0.2,
+                },
+                "daily_candles_summary": {
+                    "change_pct": -1.2,
+                    "ma5_vs_ma20_pct": -0.2,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["final_decision"] == "RISK"
+    assert calibrated["interest_score"] >= 40
+    assert any("AVOID softened" in item for item in calibrated["calibration"]["reasons"])
+    assert "AVOID" in calibrated["summary"]
+    assert "RISK" in calibrated["summary"]
 
 def test_previous_analysis_context_and_comparison():
     latest = {
@@ -1420,7 +1568,7 @@ def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
                 self.body = request.data.decode("utf-8")
                 return FakeResponse({
                     "model": "gpt-4o-mini-test",
-                    "choices": [{"message": {"content": "SYMBOL: 005930\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\n국내장 분석"}}],
+                    "choices": [{"message": {"content": "SYMBOL: 005930\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\n援?궡??遺꾩꽍"}}],
                     "usage": {"total_tokens": 20},
                 })
 
@@ -1432,6 +1580,68 @@ def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
         store.close()
         os.unlink(tmp.name)
 
+
+
+def test_quant_feedback_builds_cost_aware_symbol_guidance():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        analysis_id = store.save_analysis_result(
+            {"symbols": ["NVDA"], "collected_at": "2026-07-01 22:31:00.000000"},
+            {"model": "test", "analysis": "SYMBOL: NVDA"},
+        )
+        store.save_structured_analysis(analysis_id, [{
+            "symbol": "NVDA",
+            "final_decision": "WATCH",
+            "interest_score": 68,
+            "risk_level": "MEDIUM",
+            "confidence": "MEDIUM",
+            "summary": "test",
+        }])
+        rows = [
+            ("2026-07-01 22:31:00.000000", 100.0, 5, 0.40, 0.60, -0.10, "win"),
+            ("2026-07-01 22:32:00.000000", 100.0, 5, 0.20, 0.35, -0.20, "win"),
+            ("2026-07-01 22:45:00.000000", 100.0, 5, -0.10, 0.20, -0.50, "loss"),
+            ("2026-07-01 23:00:00.000000", 100.0, 5, 0.50, 0.80, -0.10, "win"),
+            ("2026-07-01 23:20:00.000000", 100.0, 5, 0.30, 0.45, -0.10, "win"),
+        ]
+        for created_at, anchor, horizon, ret, max_ret, min_ret, outcome in rows:
+            store.conn.execute("""
+                INSERT INTO paper_trade_candidates (
+                    created_at, analysis_id, symbol, anchor_price, horizon_min,
+                    due_at, status, result_return_pct, max_return_pct,
+                    min_return_pct, outcome, evaluated_at, payload_json
+                ) VALUES (?, ?, 'NVDA', ?, ?, ?, 'evaluated', ?, ?, ?, ?, ?, '{}')
+            """, (
+                created_at,
+                analysis_id,
+                anchor,
+                horizon,
+                created_at,
+                ret,
+                max_ret,
+                min_ret,
+                outcome,
+                "2026-07-01 23:30:00.000000",
+            ))
+        store.conn.commit()
+
+        snapshot = build_quant_feedback_snapshot(store.conn, symbols=["NVDA"], days=30, min_sample=5)
+        assert snapshot["schema"] == "toss_quant_feedback_v1"
+        assert snapshot["overview"]["evaluated_count"] == 5
+        assert snapshot["overview"]["cluster_count"] == 4
+        assert snapshot["by_symbol"][0]["symbol"] == "NVDA"
+        assert snapshot["symbol_guidance"]["NVDA"]["label"] in ("positive_expectancy", "mixed_expectancy")
+
+        evidence = {"symbol_evidence": {"NVDA": {"symbol": "NVDA"}}}
+        attach_quant_feedback_to_evidence(evidence, snapshot)
+        assert evidence["symbol_evidence"]["NVDA"]["quant_feedback"]["evaluated_count"] == 5
+        compact = compact_quant_feedback(snapshot, symbols=["NVDA"])
+        assert compact["by_symbol"][0]["symbol"] == "NVDA"
+    finally:
+        store.close()
+        os.unlink(tmp.name)
 
 def test_store_retries_transient_write_lock():
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
@@ -1495,6 +1705,9 @@ if __name__ == "__main__":
         test_trade_ticks_orderbook_analysis_and_collector_persist,
         test_tick_collector_iteration_uses_read_only_tick_endpoints,
         test_feedback_adjustments_attach_to_evidence,
+        test_decision_calibration_lowers_score_on_weak_numeric_feedback,
+        test_decision_calibration_can_raise_score_on_confirmed_positive_numbers,
+        test_decision_calibration_softens_gpt_avoid_without_severe_numeric_risk,
         test_previous_analysis_context_and_comparison,
         test_structured_analysis_splits_markdown_symbol_sections,
         test_runtime_health_and_supervisor_summary_payload,
@@ -1510,8 +1723,10 @@ if __name__ == "__main__":
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,
         test_domestic_evidence_and_gpt_payload_use_imported_feedback,
+        test_quant_feedback_builds_cost_aware_symbol_guidance,
         test_store_retries_transient_write_lock,
     ]
     for test in tests:
         test()
         print("PASS {}".format(test.__name__))
+

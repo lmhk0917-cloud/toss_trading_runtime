@@ -1,4 +1,4 @@
-"""Conservative Toss Invest runtime defaults.
+﻿"""Conservative Toss Invest runtime defaults.
 
 Secrets are read from environment variables only. Do not commit API keys,
 secret keys, access tokens, or account identifiers.
@@ -52,6 +52,8 @@ FOCUSED_NASDAQ_WATCHLIST = [
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
 
+PAPER_ROUND_TRIP_COST_PCT = float(os.environ.get("TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT", "0.0"))
+
 KIWOOM_DB_CANDIDATES = [
     r"C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab\data\ticks.db",
     r"C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1\data\ticks.db",
@@ -100,3 +102,4 @@ def missing_secret_names():
         if not os.environ.get(name):
             missing.append(name)
     return missing
+
