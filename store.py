@@ -1,4 +1,4 @@
-"""SQLite persistence for Toss focused-analysis runtime."""
+﻿"""SQLite persistence for Toss focused-analysis runtime."""
 
 import json
 import os
@@ -9,9 +9,11 @@ from datetime import datetime, timedelta
 try:
     from .security import sanitize_payload
     from .runtime_health import build_runtime_health
+    from .quant_feedback import build_quant_feedback_snapshot
 except ImportError:  # pragma: no cover
     from security import sanitize_payload
     from runtime_health import build_runtime_health
+    from quant_feedback import build_quant_feedback_snapshot
 
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "toss_runtime.db")
@@ -231,6 +233,7 @@ class TossRuntimeStore(object):
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_candle_symbol_interval_time ON candle_snapshots(symbol, interval, collected_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_events_symbol_time ON event_logs(symbol, detected_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_due ON paper_trade_candidates(status, due_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_eval_symbol ON paper_trade_candidates(status, evaluated_at, symbol)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
@@ -632,6 +635,7 @@ class TossRuntimeStore(object):
             "paper_status": paper_status,
             "top_events": top_events,
             "paper_feedback": self.paper_feedback_summary(),
+            "quant_feedback": build_quant_feedback_snapshot(self.conn),
             "health": build_runtime_health(self),
         }
 
@@ -1071,3 +1075,5 @@ def _merge_min(left, right):
     if left is None:
         return right
     return min(left, right)
+
+
