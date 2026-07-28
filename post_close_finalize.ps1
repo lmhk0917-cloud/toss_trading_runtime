@@ -1,6 +1,7 @@
 param(
     [string]$StopKst = "05:08",
-    [string]$Symbols = "MU,NVDA,QQQ"
+    [string]$Symbols = "MU,NVDA,QQQ",
+    [switch]$RunNowIfPast
 )
 
 $ErrorActionPreference = "Continue"
@@ -17,6 +18,9 @@ function Resolve-TargetTime([string]$hhmm) {
     $now = Get-Date
     $target = Get-Date -Hour ([int]$parts[0]) -Minute ([int]$parts[1]) -Second 0
     if ($target -le $now) {
+        if ($RunNowIfPast) {
+            return $now
+        }
         $target = $target.AddDays(1)
     }
     return $target
