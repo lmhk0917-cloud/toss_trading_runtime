@@ -18,7 +18,7 @@ def main(argv=None):
     parser.add_argument("--html", default=None)
     args = parser.parse_args(argv)
 
-    store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
+    store = TossRuntimeStore(db_path=args.db_path, read_only=True) if args.db_path else TossRuntimeStore(read_only=True)
     try:
         summary = store.operational_summary()
     finally:

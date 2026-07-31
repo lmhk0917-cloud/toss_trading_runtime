@@ -1,4 +1,4 @@
-﻿"""Quant-style paper feedback for the Toss read-only runtime.
+"""Quant-style paper feedback for the Toss read-only runtime.
 
 This mirrors the useful parts of Kiwoom Core Quant feedback: cost-aware
 expectancy, decision buckets, and clustered samples. It never places orders.
@@ -8,19 +8,25 @@ from datetime import datetime, timedelta
 
 try:
     from . import config
+    from .adaptive_guard import build_adaptive_guard
 except ImportError:  # pragma: no cover
     import config
+    from adaptive_guard import build_adaptive_guard
 
 
 DEFAULT_DAYS = 5
 DEFAULT_MIN_SAMPLE = 5
 DEFAULT_CLUSTER_WINDOW_MINUTES = 10
+SHORT_WINDOW_DAYS = 5
+MEDIUM_WINDOW_DAYS = 20
+MEDIUM_MIN_SAMPLE = 20
 ROUND_TRIP_COST_PCT = getattr(config, "PAPER_ROUND_TRIP_COST_PCT", 0.0)
 
 
-def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sample=DEFAULT_MIN_SAMPLE):
+def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sample=DEFAULT_MIN_SAMPLE, as_of=None):
     symbols = [str(item).strip().upper() for item in symbols or [] if str(item).strip()]
-    rows = _load_rows(conn, symbols=symbols, days=days)
+    as_of_dt = _parse_dt(as_of) or datetime.now()
+    rows = _load_rows(conn, symbols=symbols, days=days, as_of=as_of_dt)
     overview = _metric_block(rows)
     by_symbol = []
     for symbol in sorted(set(row["symbol"] for row in rows)):
@@ -42,13 +48,13 @@ def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sam
 
     return {
         "schema": "toss_quant_feedback_v1",
-        "generated_at": _now(),
+        "generated_at": _format_dt(as_of_dt),
         "window_days": int(days or 0),
-        "window_start": _window_start(days),
-        "window_end": _now(),
+        "window_start": _window_start(days, as_of=as_of_dt),
+        "window_end": _format_dt(as_of_dt),
         "min_sample": int(min_sample),
         "round_trip_cost_pct": round(float(ROUND_TRIP_COST_PCT or 0.0), 4),
-        "cost_source": "TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT env; default 0.0 when unset",
+        "cost_source": getattr(config, "PAPER_COST_SOURCE", "configured paper round-trip cost"),
         "overview": overview,
         "by_symbol": by_symbol,
         "by_decision": by_decision,
@@ -67,6 +73,78 @@ def attach_quant_feedback_to_evidence(evidence, snapshot):
         item["quant_feedback_guidance"] = guidance.get(symbol, {"label": "no_feedback", "summary": "No evaluated paper feedback yet."})
     return evidence
 
+
+def build_quant_feedback_windows(
+    conn,
+    symbols=None,
+    short_days=SHORT_WINDOW_DAYS,
+    medium_days=MEDIUM_WINDOW_DAYS,
+    short_min_sample=DEFAULT_MIN_SAMPLE,
+    medium_min_sample=MEDIUM_MIN_SAMPLE,
+):
+    """Build short and medium feedback from the same evaluated paper rows."""
+    return {
+        "schema": "toss_quant_feedback_windows_v1",
+        "generated_at": _now(),
+        "short_5d": build_quant_feedback_snapshot(
+            conn,
+            symbols=symbols,
+            days=short_days,
+            min_sample=short_min_sample,
+        ),
+        "medium_20d": build_quant_feedback_snapshot(
+            conn,
+            symbols=symbols,
+            days=medium_days,
+            min_sample=medium_min_sample,
+        ),
+    }
+
+
+def attach_quant_feedback_windows_to_evidence(evidence, windows):
+    """Attach per-symbol windows and their conservative adaptive guard."""
+    windows = windows or {}
+    evidence["quant_feedback_windows"] = {
+        "schema": windows.get("schema"),
+        "generated_at": windows.get("generated_at"),
+        "short_5d": compact_quant_feedback(windows.get("short_5d") or {}),
+        "medium_20d": compact_quant_feedback(windows.get("medium_20d") or {}),
+    }
+    short = windows.get("short_5d") or {}
+    medium = windows.get("medium_20d") or {}
+    short_by_symbol = {
+        item.get("symbol"): item
+        for item in short.get("by_symbol") or []
+        if item.get("symbol")
+    }
+    medium_by_symbol = {
+        item.get("symbol"): item
+        for item in medium.get("by_symbol") or []
+        if item.get("symbol")
+    }
+    short_guidance = short.get("symbol_guidance") or {}
+    medium_guidance = medium.get("symbol_guidance") or {}
+    for symbol, item in (evidence.get("symbol_evidence") or {}).items():
+        symbol_windows = {
+            "short_5d": {
+                "window_days": short.get("window_days"),
+                "metrics": short_by_symbol.get(symbol, _empty_symbol_block(symbol)),
+                "guidance": short_guidance.get(symbol, _no_feedback_guidance()),
+            },
+            "medium_20d": {
+                "window_days": medium.get("window_days"),
+                "metrics": medium_by_symbol.get(symbol, _empty_symbol_block(symbol)),
+                "guidance": medium_guidance.get(symbol, _no_feedback_guidance()),
+            },
+        }
+        item["quant_feedback_windows"] = symbol_windows
+        item["adaptive_guard"] = build_adaptive_guard(
+            symbol_windows["short_5d"],
+            symbol_windows["medium_20d"],
+            min_short=int(short.get("min_sample") or DEFAULT_MIN_SAMPLE),
+            min_medium=int(medium.get("min_sample") or MEDIUM_MIN_SAMPLE),
+        )
+    return evidence
 
 def compact_quant_feedback(snapshot, symbols=None, max_items=8):
     snapshot = snapshot or {}
@@ -93,10 +171,10 @@ def compact_quant_feedback(snapshot, symbols=None, max_items=8):
     }
 
 
-def _load_rows(conn, symbols=None, days=DEFAULT_DAYS):
+def _load_rows(conn, symbols=None, days=DEFAULT_DAYS, as_of=None):
     clauses = ["p.status = 'evaluated'"]
     params = []
-    window_start = _window_start(days)
+    window_start = _window_start(days, as_of=as_of)
     if window_start:
         clauses.append("p.evaluated_at >= ?")
         params.append(window_start)
@@ -221,6 +299,13 @@ def _empty_symbol_block(symbol):
     return block
 
 
+def _no_feedback_guidance():
+    return {
+        "label": "sample_too_small",
+        "summary": "No evaluated paper feedback yet.",
+        "sample_count": 0,
+    }
+
 def _values(rows, key):
     return [float(row[key]) for row in rows if row.get(key) is not None]
 
@@ -261,10 +346,14 @@ def _counts(rows, key):
     return counts
 
 
-def _window_start(days):
+def _window_start(days, as_of=None):
     if not days:
         return None
-    return (datetime.now() - timedelta(days=int(days))).strftime("%Y-%m-%d %H:%M:%S.%f")
+    return _format_dt((as_of or datetime.now()) - timedelta(days=int(days)))
+
+
+def _format_dt(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _parse_dt(value):

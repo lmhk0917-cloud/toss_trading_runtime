@@ -99,7 +99,7 @@ def load_latest_shared_kiwoom_market_context(shared_db_path=None, sections=None)
             "sections": {},
             "source_preference": "shared_context_db",
         }
-    conn = sqlite3.connect(shared_db_path)
+    conn = _connect_read_only(shared_db_path)
     conn.row_factory = sqlite3.Row
     try:
         if not _has_table(conn, "shared_context_snapshots"):
@@ -528,7 +528,7 @@ def _gap_effect(rows, domestic_symbol, kiwoom_daily):
         "intraday_reversal_corr": _pearson(open_values, intraday_values) if len(open_values) == len(intraday_values) else None,
         "reversal_count": len(reversal_rows),
         "reversal_rate": round(len(reversal_rows) / len(matched), 4) if matched else None,
-        "source": "kiwoom_personal_ver1_ticks",
+        "source": "kiwoom_ohlc_daily",
     }
 
 
@@ -536,39 +536,80 @@ def load_kiwoom_daily_returns(db_path, codes=None):
     codes = [str(item).strip() for item in codes or [] if str(item).strip()]
     if not db_path or not os.path.exists(db_path):
         return {}
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = _connect_read_only(db_path)
     try:
-        if not _has_table(conn, "ticks"):
-            return {}
         result = {}
+        has_historical = _has_table(conn, "historical_bars")
+        has_ticks = _has_table(conn, "ticks")
         for code in codes:
-            rows = conn.execute("""
-                WITH day_bounds AS (
+            bounds = _historical_daily_bounds(conn, code) if has_historical else []
+            if not bounds and has_ticks:
+                bounds = conn.execute("""
+                    WITH day_bounds AS (
+                        SELECT
+                            substr(received_at, 1, 10) AS date_key,
+                            MIN(id) AS first_id,
+                            MAX(id) AS last_id
+                        FROM ticks
+                        WHERE code = ?
+                          AND price IS NOT NULL
+                          AND received_at IS NOT NULL
+                        GROUP BY substr(received_at, 1, 10)
+                    )
                     SELECT
-                        substr(received_at, 1, 10) AS date_key,
-                        MIN(id) AS first_id,
-                        MAX(id) AS last_id
-                    FROM ticks
-                    WHERE code = ?
-                      AND price IS NOT NULL
-                      AND received_at IS NOT NULL
-                    GROUP BY substr(received_at, 1, 10)
-                )
-                SELECT
-                    d.date_key,
-                    f.open_price AS open_price,
-                    f.price AS first_price,
-                    l.price AS close_price
-                FROM day_bounds d
-                JOIN ticks f ON f.id = d.first_id
-                JOIN ticks l ON l.id = d.last_id
-                ORDER BY d.date_key ASC
-            """, (code,))
-            result[code] = _daily_returns_from_daily_bounds(rows)
+                        d.date_key,
+                        f.open_price AS open_price,
+                        f.price AS first_price,
+                        l.price AS close_price
+                    FROM day_bounds d
+                    JOIN ticks f ON f.id = d.first_id
+                    JOIN ticks l ON l.id = d.last_id
+                    ORDER BY d.date_key ASC
+                """, (code,)).fetchall()
+            result[code] = _daily_returns_from_daily_bounds(bounds)
         return result
     finally:
         conn.close()
+
+
+def _historical_daily_bounds(conn, code):
+    date_key = """
+        CASE
+            WHEN instr(bar_time, '-') > 0 THEN substr(bar_time, 1, 10)
+            ELSE substr(bar_time, 1, 4) || '-' || substr(bar_time, 5, 2) || '-' || substr(bar_time, 7, 2)
+        END
+    """
+    daily_rows = conn.execute("""
+        SELECT {date_key} AS date_key, open AS open_price,
+               close AS first_price, close AS close_price
+        FROM historical_bars
+        WHERE code = ? AND lower(timeframe) IN ('day', '1d')
+          AND open IS NOT NULL AND close IS NOT NULL
+        ORDER BY date_key ASC, id ASC
+    """.format(date_key=date_key), (code,)).fetchall()
+    by_date = {row["date_key"]: dict(row) for row in daily_rows}
+    minute_rows = conn.execute("""
+        WITH minute_source AS (
+            SELECT id, {date_key} AS date_key, open, close
+            FROM historical_bars
+            WHERE code = ? AND lower(timeframe) IN ('1m', 'minute')
+              AND open IS NOT NULL AND close IS NOT NULL
+        ),
+        day_bounds AS (
+            SELECT date_key, MIN(id) AS first_id, MAX(id) AS last_id
+            FROM minute_source
+            GROUP BY date_key
+        )
+        SELECT d.date_key, f.open AS open_price,
+               f.close AS first_price, l.close AS close_price
+        FROM day_bounds d
+        JOIN minute_source f ON f.id = d.first_id
+        JOIN minute_source l ON l.id = d.last_id
+        ORDER BY d.date_key ASC
+    """.format(date_key=date_key), (code,)).fetchall()
+    for row in minute_rows:
+        by_date.setdefault(row["date_key"], dict(row))
+    return [by_date[key] for key in sorted(by_date)]
 
 
 def load_latest_kiwoom_market_context(db_path, sections=None):
@@ -586,7 +627,7 @@ def load_latest_kiwoom_market_context(db_path, sections=None):
             "db_path": db_path,
             "sections": {},
         }
-    conn = sqlite3.connect(db_path)
+    conn = _connect_read_only(db_path)
     conn.row_factory = sqlite3.Row
     try:
         if not _has_table(conn, "market_context_snapshots"):
@@ -693,6 +734,15 @@ def _daily_returns_from_daily_bounds(rows):
         if close_price:
             previous_close = close_price
     return result
+
+
+def _connect_read_only(db_path):
+    uri = "file:{}?mode=ro".format(os.path.abspath(db_path).replace("\\", "/"))
+    conn = sqlite3.connect(uri, uri=True, timeout=120)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 120000")
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def _has_table(conn, table):

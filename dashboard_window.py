@@ -139,11 +139,12 @@ class TossDashboardWindow(object):
         panes.add(top, weight=3)
         panes.add(bottom, weight=2)
 
-        columns = ("symbol", "decision", "score", "delta", "avg_ret", "win", "worst_path", "risk", "confidence", "price", "m1", "vol", "d1")
+        columns = ("symbol", "decision", "plan", "score", "delta", "avg_ret", "win", "worst_path", "risk", "confidence", "price", "m1", "vol", "d1")
         self.symbol_tree = ttk.Treeview(top, columns=columns, show="headings", selectmode="browse")
         headings = {
             "symbol": "Symbol",
             "decision": "Decision",
+            "plan": "Trade Plan",
             "score": "Score",
             "delta": "Delta",
             "avg_ret": "Avg Ret",
@@ -159,6 +160,7 @@ class TossDashboardWindow(object):
         widths = {
             "symbol": 90,
             "decision": 110,
+            "plan": 125,
             "score": 70,
             "delta": 70,
             "avg_ret": 80,
@@ -173,7 +175,7 @@ class TossDashboardWindow(object):
         }
         for col in columns:
             self.symbol_tree.heading(col, text=headings[col])
-            self.symbol_tree.column(col, width=widths[col], anchor="e" if col not in ("symbol", "decision", "risk", "confidence") else "w")
+            self.symbol_tree.column(col, width=widths[col], anchor="e" if col not in ("symbol", "decision", "plan", "risk", "confidence") else "w")
         self.symbol_tree.pack(fill="both", expand=True, side="left")
         yscroll = ttk.Scrollbar(top, orient="vertical", command=self.symbol_tree.yview)
         self.symbol_tree.configure(yscrollcommand=yscroll.set)
@@ -181,6 +183,8 @@ class TossDashboardWindow(object):
         self.symbol_tree.bind("<<TreeviewSelect>>", self._on_symbol_selected)
 
         summary_frame = ttk.Frame(bottom, padding=8)
+        trade_plan_frame = ttk.Frame(bottom, padding=8)
+        paper_execution_frame = ttk.Frame(bottom, padding=8)
         detail_frame = ttk.Frame(bottom, padding=8)
         score_frame = ttk.Frame(bottom, padding=8)
         chart_frame = ttk.Frame(bottom, padding=8)
@@ -191,6 +195,8 @@ class TossDashboardWindow(object):
         context_frame = ttk.Frame(bottom, padding=8)
         tables_frame = ttk.Frame(bottom, padding=8)
         bottom.add(summary_frame, text="Summary")
+        bottom.add(trade_plan_frame, text="Trade Plan")
+        bottom.add(paper_execution_frame, text="Paper Execution")
         bottom.add(detail_frame, text="Details")
         bottom.add(score_frame, text="Score Trend")
         bottom.add(chart_frame, text="Minute Chart")
@@ -204,6 +210,20 @@ class TossDashboardWindow(object):
         self.summary_text = tk.Text(summary_frame, wrap="word", height=9, font=("Segoe UI", 10), relief="solid", borderwidth=1)
         self.summary_text.pack(fill="both", expand=True)
         self.summary_text.configure(state="disabled")
+
+        self.trade_plan_text = tk.Text(trade_plan_frame, wrap="word", height=9, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.trade_plan_text.pack(fill="both", expand=True)
+        self.trade_plan_text.configure(state="disabled")
+        self.paper_execution_text = tk.Text(
+            paper_execution_frame,
+            wrap="word",
+            height=9,
+            font=("Consolas", 10),
+            relief="solid",
+            borderwidth=1,
+        )
+        self.paper_execution_text.pack(fill="both", expand=True)
+        self.paper_execution_text.configure(state="disabled")
 
         self.detail_text = tk.Text(detail_frame, wrap="word", height=9, font=("Consolas", 10), relief="solid", borderwidth=1)
         self.detail_text.pack(fill="both", expand=True)
@@ -292,6 +312,7 @@ class TossDashboardWindow(object):
             "code": "Code",
             "name": "Name",
             "decision": "Decision",
+            "plan": "Trade Plan",
             "score": "Score",
             "risk": "Risk",
             "confidence": "Confidence",
@@ -381,7 +402,7 @@ class TossDashboardWindow(object):
 
     def _load_snapshot_worker(self):
         try:
-            store = TossRuntimeStore(db_path=self.db_path) if self.db_path else TossRuntimeStore()
+            store = TossRuntimeStore(db_path=self.db_path, read_only=True) if self.db_path else TossRuntimeStore(read_only=True)
             try:
                 snapshot = build_dashboard_snapshot(
                     store,
@@ -426,6 +447,7 @@ class TossDashboardWindow(object):
             self.symbol_tree.insert("", "end", iid=row.get("symbol"), values=(
                 row.get("symbol"),
                 row.get("decision"),
+                ((row.get("trade_plan") or {}).get("entry") or {}).get("status") or "not_generated",
                 _fmt(row.get("interest_score"), 0),
                 _fmt(row.get("score_delta"), 0, signed=True),
                 _fmt(feedback.get("avg_return_pct"), 4, signed=True),
@@ -460,6 +482,7 @@ class TossDashboardWindow(object):
                 paper.get("outcome") or "",
             ))
         self._render_tick_flow()
+        self._set_text(self.paper_execution_text, self._paper_execution_text())
 
         selection = self.symbol_tree.selection()
         if selection:
@@ -495,6 +518,7 @@ class TossDashboardWindow(object):
         for row in self.snapshot.get("symbols") or []:
             if row.get("symbol") == symbol:
                 self._set_text(self.summary_text, format_summary_text(row.get("summary") or ""))
+                self._set_text(self.trade_plan_text, self._trade_plan_text_for(row))
                 self._set_text(self.detail_text, self._detail_text_for(row))
                 self._draw_score_history(symbol)
                 self._draw_minute_chart(row)
@@ -502,6 +526,7 @@ class TossDashboardWindow(object):
                 self._render_events()
                 return
         self._set_text(self.summary_text, "")
+        self._set_text(self.trade_plan_text, "")
         self._set_text(self.detail_text, "")
         self._draw_score_history(None)
         self._draw_minute_chart(None)
@@ -918,6 +943,117 @@ class TossDashboardWindow(object):
             lines.append("  no paired rows for {}".format(code or "-"))
         return "\n".join(lines)
 
+    def _paper_execution_text(self):
+        summary = (self.snapshot.get("summary") or {}).get("deployment_readiness") or {}
+        counts = summary.get("counts") or {}
+        metrics = summary.get("metrics") or {}
+        lines = [
+            "Paper / Shadow Deployment Readiness",
+            "",
+            "Readiness: {}".format(summary.get("readiness") or "paper_collecting"),
+            "Live orders: disabled | Live deployment ready: false",
+            "Closed: {} / 100 | Recent: {} / 30 | Filled: {}".format(
+                counts.get("closed") or 0,
+                counts.get("recent_closed") or 0,
+                counts.get("filled") or 0,
+            ),
+            "Net expectancy: {} | Recent: {} | PF: {}".format(
+                _fmt(metrics.get("net_expectancy_pct"), 4, signed=True),
+                _fmt(metrics.get("recent_net_expectancy_pct"), 4, signed=True),
+                _fmt(metrics.get("profit_factor"), 3),
+            ),
+            "95% CI low: {} | Max drawdown: {}".format(
+                _fmt(metrics.get("mean_ci95_low_pct"), 4, signed=True),
+                _fmt(metrics.get("max_drawdown_pct"), 4, signed=True),
+            ),
+            "",
+            "Recent State Transitions",
+        ]
+        for item in (self.snapshot.get("paper_executions") or [])[:30]:
+            lines.append(
+                "{} | {} | {} -> {} | entry={} exit={} net={} | {}".format(
+                    item.get("created_at") or "-",
+                    item.get("symbol") or "-",
+                    item.get("plan_status") or "-",
+                    item.get("status") or "-",
+                    _fmt(item.get("entry_price"), 4),
+                    _fmt(item.get("exit_price"), 4),
+                    _fmt(item.get("net_return_pct"), 4, signed=True),
+                    item.get("exit_reason") or "-",
+                )
+            )
+        if not self.snapshot.get("paper_executions"):
+            lines.append("No paper execution has been materialized yet.")
+        return "\n".join(lines)
+
+    def _trade_plan_text_for(self, row):
+        plan = row.get("trade_plan") or {}
+        if not plan:
+            return "No trade plan has been generated. It will appear after the next focused analysis run."
+        entry = plan.get("entry") or {}
+        risk = plan.get("risk") or {}
+        exit_plan = plan.get("exit") or {}
+        cost = plan.get("cost_model") or {}
+        validation = plan.get("validation") or {}
+        guard = validation.get("adaptive_guard") or {}
+        blockers = entry.get("blockers") or []
+        warnings = entry.get("warnings") or []
+        lines = [
+            "{} | {} | orders_enabled={}".format(entry.get("status") or "blocked", plan.get("readiness") or "research_only", plan.get("orders_enabled")),
+            "",
+            "Adaptive Guard",
+            "  state={} | paper risk x{} | shadow promotion={}".format(
+                guard.get("state") or "pending",
+                _fmt(risk.get("paper_risk_multiplier"), 2),
+                guard.get("allow_shadow_promotion"),
+            ),
+            "  5d={} (n={}) | 20d={} (n={})".format(
+                (guard.get("short_window") or {}).get("quality") or "-",
+                (guard.get("short_window") or {}).get("sample_count") or 0,
+                (guard.get("medium_window") or {}).get("quality") or "-",
+                (guard.get("medium_window") or {}).get("sample_count") or 0,
+            ),
+            "",
+            "Cost",
+            "  round_trip_total={} | buy={} | sell={} | slippage_each_side={} | regulatory_buffer={} | fx_buffer={}".format(
+                _fmt(cost.get("round_trip_total_pct"), 4),
+                _fmt(cost.get("buy_commission_pct"), 4),
+                _fmt(cost.get("sell_commission_pct"), 4),
+                _fmt(cost.get("slippage_each_side_pct"), 4),
+                _fmt(cost.get("sell_regulatory_buffer_pct"), 4),
+                _fmt(cost.get("fx_round_trip_buffer_pct"), 4),
+            ),
+            "",
+            "Entry",
+            "  reference={} | trigger={} | zone={} ~ {}".format(
+                _fmt(entry.get("reference_price"), 4),
+                _fmt(entry.get("trigger_price"), 4),
+                _fmt(entry.get("zone_low"), 4),
+                _fmt(entry.get("zone_high"), 4),
+            ),
+            "  blockers: {}".format(", ".join(blockers) or "none"),
+            "  warnings: {}".format(", ".join(warnings) or "none"),
+            "",
+            "Exit",
+            "  initial stop={} ({})".format(_fmt(risk.get("initial_stop_price"), 4), _fmt(risk.get("initial_stop_distance_pct"), 4)),
+            "  TP1={} (50%) | TP2={} (50%)".format(_fmt(exit_plan.get("take_profit_1_price"), 4), _fmt(exit_plan.get("take_profit_2_price"), 4)),
+            "  after TP1: stop={} | trailing={} | max hold={}m".format(
+                _fmt(exit_plan.get("move_stop_after_tp1_to"), 4),
+                _fmt(exit_plan.get("trailing_after_tp1_pct"), 4),
+                risk.get("max_holding_minutes") or "-",
+            ),
+            "",
+            "Validation",
+            "  feedback={} samples={} expectancy={} PF={} | net RR1={} RR2={}".format(
+                validation.get("feedback_label") or "-",
+                validation.get("feedback_samples") or 0,
+                _fmt(validation.get("net_expectancy_pct"), 4, signed=True),
+                _fmt(validation.get("net_profit_factor"), 4),
+                _fmt(validation.get("net_reward_risk_1"), 4),
+                _fmt(validation.get("net_reward_risk_2"), 4),
+            ),
+        ]
+        return "\n".join(lines)
     def _detail_text_for(self, row):
         detail = row.get("detail") or {}
         minute = detail.get("minute") or {}

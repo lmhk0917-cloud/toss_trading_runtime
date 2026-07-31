@@ -1,4 +1,4 @@
-﻿"""Conservative Toss Invest runtime defaults.
+"""Conservative Toss Invest runtime defaults.
 
 Secrets are read from environment variables only. Do not commit API keys,
 secret keys, access tokens, or account identifiers.
@@ -52,7 +52,37 @@ FOCUSED_NASDAQ_WATCHLIST = [
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
 
-PAPER_ROUND_TRIP_COST_PCT = float(os.environ.get("TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT", "0.0"))
+# US stock paper-cost assumptions. Toss currently publishes a 0.1% US stock
+# commission per side. Slippage and regulatory values are conservative research
+# buffers, not broker quotes. FX is excluded by default because returns are
+# measured in USD; set a buffer when a KRW conversion is part of the strategy.
+US_STOCK_COMMISSION_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_COMMISSION_PCT", "0.10"))
+US_STOCK_SLIPPAGE_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_SLIPPAGE_PCT", "0.05"))
+US_STOCK_REGULATORY_BUFFER_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_REGULATORY_BUFFER_PCT", "0.01"))
+US_STOCK_FX_ROUND_TRIP_BUFFER_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_FX_ROUND_TRIP_BUFFER_PCT", "0.0"))
+_PAPER_ROUND_TRIP_COST_OVERRIDE = os.environ.get("TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT")
+PAPER_ROUND_TRIP_COST_PCT = (
+    float(_PAPER_ROUND_TRIP_COST_OVERRIDE)
+    if _PAPER_ROUND_TRIP_COST_OVERRIDE not in (None, "")
+    else (
+        US_STOCK_COMMISSION_PCT * 2
+        + US_STOCK_SLIPPAGE_PCT * 2
+        + US_STOCK_REGULATORY_BUFFER_PCT
+        + US_STOCK_FX_ROUND_TRIP_BUFFER_PCT
+    )
+)
+PAPER_COST_SOURCE = (
+    "TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT override"
+    if _PAPER_ROUND_TRIP_COST_OVERRIDE not in (None, "")
+    else "Toss official 0.1% commission per side plus configurable simulation buffers"
+)
+
+# Trade-plan gates prepare paper/shadow validation only. They cannot enable
+# orders and deliberately stop short of producing a live-trading candidate.
+TRADE_PLAN_MIN_ENTRY_SCORE = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_ENTRY_SCORE", "75"))
+TRADE_PLAN_MIN_FEEDBACK_SAMPLES = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_FEEDBACK_SAMPLES", "20"))
+TRADE_PLAN_MIN_NET_RR = float(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_NET_RR", "1.20"))
+TRADE_PLAN_MAX_HOLD_MINUTES = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MAX_HOLD_MINUTES", "60"))
 
 KIWOOM_DB_CANDIDATES = [
     r"C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab\data\ticks.db",

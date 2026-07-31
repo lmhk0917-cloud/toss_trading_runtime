@@ -45,6 +45,12 @@ def calibrate_structured_analysis(structured, evidence):
         decision = _min_decision(decision, quant_caps.get("max_decision", decision))
         risk = _max_risk(risk, quant_caps.get("min_risk", risk))
         confidence = _min_confidence(confidence, quant_caps.get("max_confidence", confidence))
+        adaptive_delta, adaptive_reasons, adaptive_caps = _adaptive_guard_adjustment(symbol_evidence)
+        score += adaptive_delta
+        reasons.extend(adaptive_reasons)
+        decision = _min_decision(decision, adaptive_caps.get("max_decision", decision))
+        risk = _max_risk(risk, adaptive_caps.get("min_risk", risk))
+        confidence = _min_confidence(confidence, adaptive_caps.get("max_confidence", confidence))
 
         live_delta, live_reasons, live_caps = _live_candle_adjustment(symbol_evidence)
         score += live_delta
@@ -184,6 +190,45 @@ def _quant_feedback_adjustment(symbol_evidence):
         reasons.append("high adverse_path_rate={:.2f}".format(adverse))
     return delta, reasons, caps
 
+
+def _adaptive_guard_adjustment(symbol_evidence):
+    guard = symbol_evidence.get("adaptive_guard") or {}
+    state = guard.get("state")
+    if state == "consistent_positive":
+        return 2, ["adaptive 5d/20d windows both positive"], {}
+    if state == "short_positive_medium_negative":
+        return -6, ["adaptive short improvement conflicts with negative 20d window"], {
+            "max_decision": "OBSERVE",
+            "max_confidence": "MEDIUM",
+        }
+    if state == "deteriorating":
+        return -10, ["adaptive 5d window deteriorated against positive 20d window"], {
+            "max_decision": "RISK",
+            "min_risk": "HIGH",
+            "max_confidence": "MEDIUM",
+        }
+    if state == "consistent_negative":
+        return -12, ["adaptive 5d/20d windows both negative"], {
+            "max_decision": "RISK",
+            "min_risk": "HIGH",
+            "max_confidence": "MEDIUM",
+        }
+    if state == "recent_negative_medium_insufficient":
+        return -8, ["adaptive recent window negative; 20d sample is insufficient"], {
+            "max_decision": "RISK",
+            "min_risk": "HIGH",
+            "max_confidence": "MEDIUM",
+        }
+    if state == "mixed":
+        return -4, ["adaptive 5d/20d windows are mixed"], {
+            "max_decision": "OBSERVE",
+            "max_confidence": "MEDIUM",
+        }
+    if state == "insufficient":
+        return -2, ["adaptive multi-window sample is insufficient"], {
+            "max_confidence": "MEDIUM",
+        }
+    return 0, [], {}
 
 def _live_candle_adjustment(symbol_evidence):
     minute = symbol_evidence.get("minute_candles_summary") or {}

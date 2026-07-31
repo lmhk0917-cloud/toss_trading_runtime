@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import sqlite3
 import sys
@@ -1627,12 +1627,18 @@ def test_quant_feedback_builds_cost_aware_symbol_guidance():
             ))
         store.conn.commit()
 
-        snapshot = build_quant_feedback_snapshot(store.conn, symbols=["NVDA"], days=30, min_sample=5)
+        snapshot = build_quant_feedback_snapshot(
+            store.conn,
+            symbols=["NVDA"],
+            days=30,
+            min_sample=5,
+            as_of="2026-07-01 23:30:00.000000",
+        )
         assert snapshot["schema"] == "toss_quant_feedback_v1"
         assert snapshot["overview"]["evaluated_count"] == 5
         assert snapshot["overview"]["cluster_count"] == 4
         assert snapshot["by_symbol"][0]["symbol"] == "NVDA"
-        assert snapshot["symbol_guidance"]["NVDA"]["label"] in ("positive_expectancy", "mixed_expectancy")
+        assert snapshot["symbol_guidance"]["NVDA"]["label"] == "negative_expectancy"
 
         evidence = {"symbol_evidence": {"NVDA": {"symbol": "NVDA"}}}
         attach_quant_feedback_to_evidence(evidence, snapshot)

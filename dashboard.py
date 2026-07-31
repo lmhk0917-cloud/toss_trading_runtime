@@ -35,7 +35,7 @@ def main(argv=None):
 
     symbols = [item.strip().upper() for item in args.symbols.split(",") if item.strip()]
     domestic_symbols = [item.strip() for item in args.domestic_symbols.split(",") if item.strip()]
-    store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
+    store = TossRuntimeStore(db_path=args.db_path, read_only=True) if args.db_path else TossRuntimeStore(read_only=True)
     try:
         snapshot = build_dashboard_snapshot(store, symbols=symbols, domestic_symbols=domestic_symbols)
     finally:
@@ -64,6 +64,7 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
         minute = _latest_candle(store, symbol, "1m")
         daily = _latest_candle(store, symbol, "1d")
         item = structured.get(symbol) or {}
+        item_payload = _parse_json_payload(item.get("payload_json"))
         previous = _previous_structured(store, symbol, item.get("analysis_id"))
         current_score = _to_int(item.get("interest_score"))
         previous_score = _to_int(previous.get("interest_score"))
@@ -74,6 +75,7 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
             "score_delta": _delta(current_score, previous_score),
             "risk_level": item.get("risk_level") or "unknown",
             "confidence": item.get("confidence") or "unknown",
+            "trade_plan": item_payload.get("trade_plan") or {},
             "price": _to_float(latest_price.get("price")),
             "price_time": latest_price.get("collected_at"),
             "minute_change_pct": _to_float(minute.get("change_pct")),
@@ -115,6 +117,7 @@ def build_dashboard_snapshot(store, symbols=None, domestic_symbols=None):
         "recent_events": _recent_events(store),
         "symbol_events": _recent_events_by_symbol(store, symbols=symbols),
         "paper_candidates": _recent_paper_candidates(store, symbols=symbols),
+        "paper_executions": _recent_paper_executions(store, symbols=symbols),
         "paper_feedback": summary.get("paper_feedback") or [],
         "return_feedback": return_feedback,
         "score_history": _score_history(store, symbols=symbols),
@@ -139,13 +142,22 @@ def render_dashboard_html(snapshot):
     tick_rows = "\n".join(_tick_row((row.get("tick_analysis") or {})) for row in snapshot.get("symbols") or [])
     event_rows = "\n".join(_event_row(row) for row in snapshot.get("recent_events") or [])
     feedback_rows = "\n".join(_feedback_row(row) for row in snapshot.get("paper_feedback") or [])
+    execution_rows = "\n".join(_paper_execution_row(row) for row in snapshot.get("paper_executions") or [])
+    readiness = summary.get("deployment_readiness") or {}
+    readiness_metrics = readiness.get("metrics") or {}
+    readiness_counts = readiness.get("counts") or {}
+    failed_checks = [item.get("name") for item in readiness.get("checks") or [] if not item.get("passed")]
     domestic_rows = "\n".join(_domestic_row(row) for row in snapshot.get("domestic") or [])
     relationship_rows = "\n".join(_relationship_row(row) for row in ((snapshot.get("relationship") or {}).get("pairs") or []))
     context = snapshot.get("latest_context") or {}
     relationship = snapshot.get("relationship") or {}
     shared_context = snapshot.get("shared_context_status") or {}
+    table_quality = summary.get("table_count_quality") or {}
     table_cells = "\n".join(
-        "<tr><td>{}</td><td>{}</td></tr>".format(_e(key), _e(value))
+        "<tr><td>{}</td><td>{}</td></tr>".format(
+            _e(key),
+            _e("{}+".format(value) if not (table_quality.get(key) or {}).get("exact", True) else value),
+        )
         for key, value in sorted(tables.items())
     )
     warnings = health.get("warnings") or []
@@ -261,11 +273,22 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     <p class="meta">Warnings: {warning_text}</p>
   </section>
   <section>
+    <h2>Deployment Readiness (Paper / Shadow Only)</h2>
+    <div class="metrics">
+      <div class="metric"><div class="label">Readiness</div><div class="value">{readiness}</div></div>
+      <div class="metric"><div class="label">Closed / Required</div><div class="value">{readiness_closed} / 100</div></div>
+      <div class="metric"><div class="label">Net Expectancy</div><div class="value">{readiness_expectancy}%</div></div>
+      <div class="metric"><div class="label">Profit Factor</div><div class="value">{readiness_pf}</div></div>
+      <div class="metric"><div class="label">95% CI Low</div><div class="value">{readiness_ci_low}%</div></div>
+      <div class="metric"><div class="label">Max Drawdown</div><div class="value">{readiness_mdd}%</div></div>
+    </div>
+    <p class="meta">Live orders: disabled | failed checks: {readiness_failed}</p>
+  </section>  <section>
     <h2>Focused Symbols</h2>
     <table>
       <thead>
         <tr>
-          <th>Symbol</th><th>Decision</th><th class="num">Score</th><th class="num">Delta</th>
+          <th>Symbol</th><th>Decision</th><th>Plan</th><th class="num">Score</th><th class="num">Delta</th>
           <th>Risk</th><th>Confidence</th><th class="num">Price</th>
           <th class="num">1m %</th><th class="num">1m Vol</th><th class="num">1d %</th>
           <th>Paper</th><th>Summary</th>
@@ -289,6 +312,12 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
     </table>
   </section>
   <section>
+    <h2>Paper Execution States</h2>
+    <table>
+      <thead><tr><th>Created</th><th>Symbol</th><th>Plan</th><th>State</th><th>Adaptive</th><th class="num">Risk x</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Net %</th><th class="num">MFE</th><th class="num">MAE</th><th>Exit Reason</th></tr></thead>
+      <tbody>{execution_rows}</tbody>
+    </table>
+  </section>  <section>
     <h2>Paper Feedback</h2>
     <table>
       <thead><tr><th>Symbol</th><th class="num">Horizon</th><th class="num">Count</th><th class="num">Win</th><th class="num">Avg %</th><th class="num">Best %</th><th class="num">Worst %</th></tr></thead>
@@ -354,6 +383,14 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
         tick_rows=tick_rows,
         event_rows=event_rows,
         feedback_rows=feedback_rows,
+        execution_rows=execution_rows,
+        readiness=_e(readiness.get("readiness") or "paper_collecting"),
+        readiness_closed=_e(readiness_counts.get("closed") or 0),
+        readiness_expectancy=_fmt(readiness_metrics.get("net_expectancy_pct"), decimals=4),
+        readiness_pf=_fmt(readiness_metrics.get("profit_factor"), decimals=3),
+        readiness_ci_low=_fmt(readiness_metrics.get("mean_ci95_low_pct"), decimals=4),
+        readiness_mdd=_fmt(readiness_metrics.get("max_drawdown_pct"), decimals=4),
+        readiness_failed=_e(", ".join(failed_checks) or "none"),
         domestic_rows=domestic_rows,
         relationship_regime=_e(relationship.get("relationship_regime") or "insufficient_evidence"),
         relationship_samples=_e(((relationship.get("data_quality") or {}).get("paired_observation_count")) or 0),
@@ -386,9 +423,26 @@ def _symbol_row(row):
         paper.get("avg_return_pct", 0),
     )
     risk = str(row.get("risk_level") or "unknown").upper()
+    plan = row.get("trade_plan") or {}
+    entry = plan.get("entry") or {}
+    exit_plan = plan.get("exit") or {}
+    risk_plan = plan.get("risk") or {}
+    cost = plan.get("cost_model") or {}
+    guard = (plan.get("validation") or {}).get("adaptive_guard") or {}
+    plan_text = "{} | {} x{} | cost {}% | entry {} | stop {} | TP1 {} | TP2 {}".format(
+        entry.get("status") or "not_generated",
+        guard.get("state") or "adaptive_pending",
+        _fmt(risk_plan.get("paper_risk_multiplier"), decimals=2),
+        _fmt(cost.get("round_trip_total_pct"), decimals=2),
+        _fmt(entry.get("trigger_price"), decimals=2),
+        _fmt(risk_plan.get("initial_stop_price"), decimals=2),
+        _fmt(exit_plan.get("take_profit_1_price"), decimals=2),
+        _fmt(exit_plan.get("take_profit_2_price"), decimals=2),
+    )
     return """<tr>
 <td><strong>{symbol}</strong><div class="muted">{price_time}</div></td>
 <td><span class="pill">{decision}</span></td>
+<td><div class="summary">{plan}</div></td>
 <td class="num">{score}</td>
 <td class="num {delta_class}">{delta}</td>
 <td><span class="pill risk-{risk}">{risk}</span></td>
@@ -403,6 +457,7 @@ def _symbol_row(row):
         symbol=_e(row.get("symbol")),
         price_time=_e(row.get("price_time") or ""),
         decision=_e(row.get("decision")),
+        plan=_e(plan_text),
         score=_fmt(row.get("interest_score"), decimals=0),
         delta_class=delta_class,
         delta=_fmt(score_delta, decimals=0, signed=True),
@@ -554,8 +609,11 @@ def _shared_context_status():
         return status
     try:
         import sqlite3
-        conn = sqlite3.connect(db_path)
+        uri = "file:{}?mode=ro".format(os.path.abspath(db_path).replace("\\", "/"))
+        conn = sqlite3.connect(uri, uri=True, timeout=120)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 120000")
+        conn.execute("PRAGMA query_only = ON")
         try:
             quick = conn.execute("PRAGMA quick_check").fetchone()
             if not quick or quick[0] != "ok":
@@ -693,6 +751,56 @@ def _recent_paper_candidates(store, symbols=None, limit=80):
     """.format(where=where), params).fetchall()
     return [dict(row) for row in rows]
 
+
+def _recent_paper_executions(store, symbols=None, limit=60):
+    symbols = [str(item).upper() for item in symbols or []]
+    params = []
+    where = ""
+    if symbols:
+        where = "WHERE symbol IN ({})".format(",".join("?" for _ in symbols))
+        params.extend(symbols)
+    params.append(int(limit))
+    rows = store.conn.execute("""
+        SELECT created_at, symbol, plan_status, status, adaptive_state,
+               risk_multiplier, entry_price, exit_price, net_return_pct,
+               mfe_pct, mae_pct, exit_reason, plan_json, result_json
+        FROM paper_execution_orders
+        {where}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+    """.format(where=where), params).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        plan = _parse_json_payload(item.pop("plan_json", None))
+        replay = _parse_json_payload(item.pop("result_json", None))
+        blockers = ((plan.get("entry") or {}).get("blockers") or [])
+        item["exit_reason"] = (
+            item.get("exit_reason")
+            or ", ".join(blockers)
+            or replay.get("exit_reason")
+            or None
+        )
+        result.append(item)
+    return result
+
+
+def _paper_execution_row(row):
+    return """<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td><td class="num">{}</td><td class="num">{}</td><td>{}</td></tr>""".format(
+        _e(row.get("created_at")),
+        _e(row.get("symbol")),
+        _e(row.get("plan_status")),
+        _e(row.get("status")),
+        _e(row.get("adaptive_state") or "-"),
+        _fmt(row.get("risk_multiplier"), decimals=2),
+        _fmt(row.get("entry_price"), decimals=4),
+        _fmt(row.get("exit_price"), decimals=4),
+        _num_class(row.get("net_return_pct")),
+        _fmt(row.get("net_return_pct"), decimals=4),
+        _fmt(row.get("mfe_pct"), decimals=4),
+        _fmt(row.get("mae_pct"), decimals=4),
+        _e(row.get("exit_reason") or ""),
+    )
 
 def _score_history(store, symbols=None, limit=12):
     symbols = [str(item).upper() for item in symbols or []]

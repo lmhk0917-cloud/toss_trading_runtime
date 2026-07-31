@@ -10,18 +10,32 @@ try:
     from .security import sanitize_payload
     from .runtime_health import build_runtime_health
     from .quant_feedback import build_quant_feedback_snapshot
+    from .paper_execution import (
+        ASSUMPTION_VERSION, TERMINAL_STATES, build_readiness_report, simulate_order,
+    )
 except ImportError:  # pragma: no cover
     from security import sanitize_payload
     from runtime_health import build_runtime_health
     from quant_feedback import build_quant_feedback_snapshot
+    from paper_execution import (
+        ASSUMPTION_VERSION, TERMINAL_STATES, build_readiness_report, simulate_order,
+    )
 
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "toss_runtime.db")
 
 
 class TossRuntimeStore(object):
-    def __init__(self, db_path=DEFAULT_DB_PATH):
+    def __init__(self, db_path=DEFAULT_DB_PATH, read_only=False):
         self.db_path = db_path
+        self.read_only = bool(read_only)
+        if self.read_only:
+            uri = "file:{}?mode=ro".format(os.path.abspath(db_path).replace("\\", "/"))
+            self.conn = sqlite3.connect(uri, uri=True, timeout=120)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA busy_timeout = 120000")
+            self.conn.execute("PRAGMA query_only = ON")
+            return
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.conn = sqlite3.connect(db_path, timeout=120)
         self.conn.row_factory = sqlite3.Row
@@ -122,6 +136,48 @@ class TossRuntimeStore(object):
                 confidence TEXT,
                 summary TEXT,
                 payload_json TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_execution_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                analysis_id INTEGER,
+                symbol TEXT NOT NULL,
+                plan_status TEXT,
+                status TEXT NOT NULL,
+                risk_multiplier REAL,
+                adaptive_state TEXT,
+                entry_filled_at TEXT,
+                entry_price REAL,
+                exit_at TEXT,
+                exit_price REAL,
+                remaining_fraction REAL,
+                gross_return_pct REAL,
+                net_return_pct REAL,
+                mfe_pct REAL,
+                mae_pct REAL,
+                exit_reason TEXT,
+                assumption_version TEXT NOT NULL,
+                orders_called INTEGER NOT NULL DEFAULT 0,
+                plan_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                UNIQUE(analysis_id, symbol)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_execution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                paper_order_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL UNIQUE,
+                event_at TEXT,
+                event_type TEXT NOT NULL,
+                state TEXT,
+                price REAL,
+                fraction REAL,
+                note TEXT,
+                payload_json TEXT NOT NULL
             )
         """)
         self.conn.execute("""
@@ -235,6 +291,9 @@ class TossRuntimeStore(object):
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_due ON paper_trade_candidates(status, due_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_eval_symbol ON paper_trade_candidates(status, evaluated_at, symbol)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_status_time ON paper_execution_orders(status, updated_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_symbol_time ON paper_execution_orders(symbol, created_at)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_event_order_time ON paper_execution_events(paper_order_id, event_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_feedback_code ON domestic_feedback_summary(code, horizon_min)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_domestic_signal_code ON domestic_signal_summary(code)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_relationship_pair_time ON market_relationship_observations(source_symbol, target_symbol, lag_label, observed_at)")
@@ -249,10 +308,16 @@ class TossRuntimeStore(object):
             self._execute_write("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, column_type))
 
     def _execute_write(self, query, params=()):
+        self._assert_writable()
         return self._with_write_retry(lambda: self.conn.execute(query, params))
 
     def _commit(self):
+        self._assert_writable()
         return self._with_write_retry(self.conn.commit)
+
+    def _assert_writable(self):
+        if self.read_only:
+            raise RuntimeError("TossRuntimeStore is read-only")
 
     def _with_write_retry(self, func, max_attempts=8):
         delay = 0.25
@@ -450,6 +515,133 @@ class TossRuntimeStore(object):
         self._commit()
         return evaluated
 
+    def create_paper_execution_orders(self, analysis_id, structured, created_at=None):
+        """Persist paper/shadow plans and guard rejections without broker calls."""
+        created_at = created_at or _now()
+        created = 0
+        for item in structured or []:
+            symbol = str(item.get("symbol") or "").upper()
+            plan = item.get("trade_plan") or {}
+            if not symbol or not plan:
+                continue
+            initial = simulate_order(plan, [], created_at, asof=created_at)
+            cursor = self._execute_write("""
+                INSERT OR IGNORE INTO paper_execution_orders (
+                    created_at, updated_at, analysis_id, symbol, plan_status,
+                    status, risk_multiplier, adaptive_state, remaining_fraction,
+                    assumption_version, orders_called, plan_json, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (
+                created_at,
+                _now(),
+                analysis_id,
+                symbol,
+                (plan.get("entry") or {}).get("status"),
+                initial.get("status"),
+                initial.get("risk_multiplier"),
+                initial.get("adaptive_state"),
+                initial.get("remaining_fraction"),
+                ASSUMPTION_VERSION,
+                _json(plan),
+                _json(initial),
+            ))
+            if cursor.rowcount:
+                order_id = cursor.lastrowid
+                self._save_paper_execution_events(order_id, initial.get("events") or [])
+                created += 1
+        self._commit()
+        return created
+
+    def advance_paper_execution_orders(self, now=None, limit=1000):
+        """Replay stored prices and advance every active paper position."""
+        now = now or _now()
+        terminal = sorted(TERMINAL_STATES)
+        placeholders = ",".join("?" for _ in terminal)
+        rows = self.conn.execute("""
+            SELECT *
+            FROM paper_execution_orders
+            WHERE status NOT IN ({})
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+        """.format(placeholders), terminal + [int(limit)]).fetchall()
+        advanced = 0
+        closed = 0
+        for row in rows:
+            plan = _load_json(row["plan_json"])
+            points = self._paper_execution_price_path(
+                row["symbol"], row["created_at"], now,
+            )
+            result = simulate_order(plan, points, row["created_at"], asof=now)
+            if result.get("status") == row["status"] and not result.get("terminal"):
+                continue
+            self._execute_write("""
+                UPDATE paper_execution_orders
+                SET updated_at = ?, status = ?, risk_multiplier = ?,
+                    adaptive_state = ?, entry_filled_at = ?, entry_price = ?,
+                    exit_at = ?, exit_price = ?, remaining_fraction = ?,
+                    gross_return_pct = ?, net_return_pct = ?, mfe_pct = ?,
+                    mae_pct = ?, exit_reason = ?, orders_called = 0,
+                    result_json = ?
+                WHERE id = ?
+            """, (
+                _now(), result.get("status"), result.get("risk_multiplier"),
+                result.get("adaptive_state"), result.get("entry_filled_at"),
+                result.get("entry_price"), result.get("exit_at"),
+                result.get("average_exit_price"), result.get("remaining_fraction"),
+                result.get("gross_return_pct"), result.get("net_return_pct"),
+                result.get("mfe_pct"), result.get("mae_pct"),
+                result.get("exit_reason"), _json(result), row["id"],
+            ))
+            self._save_paper_execution_events(row["id"], result.get("events") or [])
+            advanced += 1
+            if result.get("terminal"):
+                closed += 1
+        self._commit()
+        return {"advanced": advanced, "closed": closed}
+
+    def paper_execution_readiness(self, symbol=None):
+        params = []
+        where = ""
+        if symbol:
+            where = "WHERE symbol = ?"
+            params.append(str(symbol).upper())
+        rows = self.conn.execute("""
+            SELECT status, entry_filled_at, exit_at, updated_at, net_return_pct
+            FROM paper_execution_orders
+            {}
+            ORDER BY COALESCE(exit_at, updated_at) ASC, id ASC
+        """.format(where), params).fetchall()
+        return build_readiness_report(rows)
+
+    def _paper_execution_price_path(self, symbol, start_at, end_at):
+        rows = self.conn.execute("""
+            SELECT collected_at AS at, price
+            FROM price_snapshots
+            WHERE symbol = ? AND collected_at >= ? AND collected_at <= ?
+            UNION ALL
+            SELECT collected_at AS at, price
+            FROM trade_ticks
+            WHERE symbol = ? AND collected_at >= ? AND collected_at <= ?
+            ORDER BY at ASC
+        """, (symbol, start_at, end_at, symbol, start_at, end_at)).fetchall()
+        return [dict(row) for row in rows]
+
+    def _save_paper_execution_events(self, order_id, events):
+        for event in events or []:
+            event_key = "{}|{}|{}|{}|{}|{}".format(
+                order_id, event.get("event_type"), event.get("event_at"),
+                event.get("price"), event.get("state"), event.get("fraction"),
+            )
+            self._execute_write("""
+                INSERT OR IGNORE INTO paper_execution_events (
+                    paper_order_id, event_key, event_at, event_type, state,
+                    price, fraction, note, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                order_id, event_key, event.get("event_at"),
+                event.get("event_type"), event.get("state"), event.get("price"),
+                event.get("fraction"), event.get("note"), _json(event),
+            ))
     def paper_feedback_summary(self, limit=200):
         rows = self.conn.execute("""
             SELECT symbol, horizon_min, result_return_pct, max_return_pct, min_return_pct, outcome
@@ -593,6 +785,7 @@ class TossRuntimeStore(object):
 
     def operational_summary(self):
         tables = {}
+        table_count_quality = {}
         for table in [
             "price_snapshots",
             "candle_snapshots",
@@ -601,6 +794,8 @@ class TossRuntimeStore(object):
             "analysis_results",
             "paper_trade_candidates",
             "structured_analysis",
+            "paper_execution_orders",
+            "paper_execution_events",
             "domestic_feedback_summary",
             "domestic_signal_summary",
             "market_relationship_observations",
@@ -608,7 +803,12 @@ class TossRuntimeStore(object):
             "orderbook_snapshots",
             "tick_analysis_snapshots",
         ]:
-            tables[table] = self.count_rows(table)
+            count, exact, high_watermark = self._summary_row_count(table)
+            tables[table] = count
+            table_count_quality[table] = {
+                "exact": exact,
+                "high_watermark_id": high_watermark,
+            }
         latest_analysis = self.conn.execute("""
             SELECT analyzed_at, symbols, model, total_tokens
             FROM analysis_results
@@ -631,11 +831,13 @@ class TossRuntimeStore(object):
         return {
             "db_path": os.path.abspath(self.db_path),
             "tables": tables,
+            "table_count_quality": table_count_quality,
             "latest_analysis": dict(latest_analysis) if latest_analysis else None,
             "paper_status": paper_status,
             "top_events": top_events,
             "paper_feedback": self.paper_feedback_summary(),
             "quant_feedback": build_quant_feedback_snapshot(self.conn),
+            "deployment_readiness": self.paper_execution_readiness(),
             "health": build_runtime_health(self),
         }
 
@@ -972,9 +1174,35 @@ class TossRuntimeStore(object):
         row = self.conn.execute("SELECT COUNT(1) AS count FROM {}".format(table)).fetchone()
         return int(row["count"])
 
+    def _summary_row_count(self, table, limit=100000):
+        if table != "trade_ticks":
+            count = self.count_rows(table)
+            return count, True, count
+        row = self.conn.execute(
+            "SELECT COUNT(1) AS count FROM (SELECT id FROM trade_ticks LIMIT ?)",
+            (int(limit) + 1,),
+        ).fetchone()
+        observed = int(row["count"] or 0)
+        high = self.conn.execute("SELECT MAX(id) AS value FROM trade_ticks").fetchone()
+        high_watermark = int(high["value"] or 0)
+        if observed <= int(limit):
+            return observed, True, high_watermark
+        return int(limit), False, high_watermark
+
     def close(self):
         self.conn.close()
 
+
+def _load_json(value):
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError):
+        return {}
 
 def _json(value):
     return json.dumps(sanitize_payload(value), ensure_ascii=False, default=str)
