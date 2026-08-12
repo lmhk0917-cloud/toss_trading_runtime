@@ -1,4 +1,4 @@
-﻿"""Generate the post-close review markdown from Toss and Kiwoom evidence."""
+"""Generate the post-close review markdown from Toss and Kiwoom evidence."""
 
 import argparse
 import json
@@ -27,7 +27,7 @@ DEFAULT_KIWOOM_ROOTS = [
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate Toss post-close review markdown.")
-    parser.add_argument("--symbols", default="MU,NVDA,QQQ")
+    parser.add_argument("--symbols", default=",".join(config.FOCUSED_NASDAQ_WATCHLIST))
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
     parser.add_argument("--reports-dir", default=DEFAULT_REPORTS_DIR)
     parser.add_argument("--latest-name", default="post_close_review_latest.md")
@@ -183,6 +183,10 @@ def build_review(db_path, reports_dir, symbols):
     lines.append("- expectancy_pct: {}".format(q_overview.get("expectancy_pct")))
     lines.append("- net_win_rate_pct: {}".format(q_overview.get("net_win_rate_pct")))
     lines.append("- net_profit_factor: {}".format(q_overview.get("net_profit_factor")))
+    lines.append("- directional_evaluated_count: {}".format(q_overview.get("directional_evaluated_count")))
+    lines.append("- avg_net_directional_return_pct: {}".format(q_overview.get("avg_net_directional_return_pct")))
+    lines.append("- net_directional_success_pct: {}".format(q_overview.get("net_directional_success_pct")))
+    lines.append("- net_directional_profit_factor: {}".format(q_overview.get("net_directional_profit_factor")))
     lines.append("")
     for row in quant_feedback.get("by_symbol") or []:
         guidance = (quant_feedback.get("symbol_guidance") or {}).get(row.get("symbol"), {})
@@ -194,6 +198,26 @@ def build_review(db_path, reports_dir, symbols):
             net_profit_factor=row.get("net_profit_factor"),
             label=guidance.get("label", "none"),
         ))
+    lines.append("")
+    lines.append("## Regime Profitability")
+    lines.append("")
+    for row in quant_feedback.get("by_regime") or []:
+        regime_guidance = row.get("guidance") or {}
+        lines.append(
+            "- {regime}: directional_samples={directional_evaluated_count} "
+            "net_directional={avg_net_directional_return_pct}% "
+            "directional_win={net_directional_success_pct}% "
+            "directional_pf={net_directional_profit_factor} label={label}".format(
+                regime=row.get("regime"),
+                directional_evaluated_count=row.get("directional_evaluated_count"),
+                avg_net_directional_return_pct=row.get("avg_net_directional_return_pct"),
+                net_directional_success_pct=row.get("net_directional_success_pct"),
+                net_directional_profit_factor=row.get("net_directional_profit_factor"),
+                label=regime_guidance.get("label"),
+            )
+        )
+    if not quant_feedback.get("by_regime"):
+        lines.append("- no regime-tagged feedback yet")
     lines.append("")
     lines.append("## Top Events")
     lines.append("")

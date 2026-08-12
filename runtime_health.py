@@ -5,9 +5,9 @@ from datetime import datetime
 
 def build_runtime_health(store, max_age_minutes=10):
     now = datetime.now()
-    latest_price = _latest_row(store, "price_snapshots", "collected_at")
-    latest_candle = _latest_row(store, "candle_snapshots", "collected_at")
-    latest_context = _latest_row(store, "market_context_snapshots", "collected_at")
+    latest_price = _latest_row(store, "price_snapshots")
+    latest_candle = _latest_row(store, "candle_snapshots")
+    latest_context = _latest_row(store, "market_context_snapshots")
     pending_paper = store.conn.execute("""
         SELECT COUNT(1) AS count
         FROM paper_trade_candidates
@@ -48,13 +48,13 @@ def build_runtime_health(store, max_age_minutes=10):
     }
 
 
-def _latest_row(store, table, time_column):
+def _latest_row(store, table):
     row = store.conn.execute("""
         SELECT *
         FROM {}
-        ORDER BY {} DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
-    """.format(table, time_column)).fetchone()
+    """.format(table)).fetchone()
     return dict(row) if row else {}
 
 

@@ -3,7 +3,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from . import config
@@ -23,6 +23,22 @@ SHARED_KIWOOM_SECTIONS = (
 )
 
 
+_RELATIONSHIP_PAIR_CACHE = {}
+_RELATIONSHIP_PAIR_CACHE_MAX = 8
+_COMPACT_PAYLOAD_KEYS = (
+    "driver_return_pct",
+    "response_return_pct",
+    "driver_symbol",
+    "response_symbol",
+    "observation_timeframe",
+    "resolution",
+    "data_source",
+    "observation_granularity",
+    "intraday_source",
+    "tick_source",
+    "resolution_warning",
+)
+
 def build_relationship_evidence(
     store,
     domestic_codes=None,
@@ -33,24 +49,29 @@ def build_relationship_evidence(
 ):
     domestic_codes = [str(item).strip() for item in domestic_codes or DEFAULT_DOMESTIC_CODES if str(item).strip()]
     us_symbols = [str(item).strip().upper() for item in us_symbols or DEFAULT_US_SYMBOLS if str(item).strip()]
-    observations = store.relationship_observations(domestic_codes=domestic_codes, us_symbols=us_symbols)
     resolved_kiwoom_db_path = kiwoom_db_path or config.KIWOOM_PERSONAL_DB_PATH
-    kiwoom_daily = load_kiwoom_daily_returns(resolved_kiwoom_db_path, domestic_codes)
+    pair_analysis = _cached_pair_analysis(
+        store,
+        domestic_codes=domestic_codes,
+        us_symbols=us_symbols,
+        min_samples=min_samples,
+        kiwoom_db_path=resolved_kiwoom_db_path,
+    )
     if shared_context_db_path is not None or kiwoom_db_path is None:
         kiwoom_market_context = load_latest_shared_kiwoom_market_context(shared_db_path=shared_context_db_path)
     else:
         kiwoom_market_context = {"status": "explicit_direct_db"}
     if kiwoom_market_context.get("status") in ("missing_db", "missing_table", "empty", "explicit_direct_db"):
         kiwoom_market_context = load_latest_kiwoom_market_context(resolved_kiwoom_db_path)
-    pair_results = _pair_results(observations, min_samples=min_samples, kiwoom_daily=kiwoom_daily)
+    pair_results = pair_analysis["pair_results"]
     domestic_snapshot = store.domestic_snapshot(codes=domestic_codes)
     us_feedback = store.return_feedback_by_symbol()
     proxy = _proxy_alignment(domestic_snapshot, us_feedback, domestic_codes, us_symbols)
     data_quality = {
         "min_samples": int(min_samples),
-        "paired_observation_count": len(observations),
-        "daily_historical_observation_count": _count_daily_historical(observations),
-        "kiwoom_daily_return_count": sum(len(value) for value in kiwoom_daily.values()),
+        "paired_observation_count": pair_analysis["paired_observation_count"],
+        "daily_historical_observation_count": pair_analysis["daily_historical_observation_count"],
+        "kiwoom_daily_return_count": pair_analysis["kiwoom_daily_return_count"],
         "has_paired_observations": bool(pair_results),
         "has_valid_pair_results": any(
             row.get("relationship_regime") != "insufficient_evidence"
@@ -88,6 +109,55 @@ def build_relationship_evidence(
         ],
     }
 
+
+def _cached_pair_analysis(store, domestic_codes, us_symbols, min_samples, kiwoom_db_path):
+    cache_key = (
+        os.path.abspath(getattr(store, "db_path", "unknown")),
+        tuple(domestic_codes),
+        tuple(us_symbols),
+        int(min_samples),
+        os.path.abspath(kiwoom_db_path) if kiwoom_db_path else None,
+    )
+    observation_marker = store.relationship_observation_marker(
+        domestic_codes=domestic_codes,
+        us_symbols=us_symbols,
+    )
+    marker = (observation_marker, _database_file_marker(kiwoom_db_path))
+    cached = _RELATIONSHIP_PAIR_CACHE.get(cache_key)
+    if cached and cached.get("marker") == marker:
+        return cached["analysis"]
+
+    observations = _prepare_observations(
+        store.relationship_observations(
+            domestic_codes=domestic_codes,
+            us_symbols=us_symbols,
+            compact=True,
+        )
+    )
+    kiwoom_daily = load_kiwoom_daily_returns(kiwoom_db_path, domestic_codes)
+    analysis = {
+        "pair_results": _pair_results(observations, min_samples=min_samples, kiwoom_daily=kiwoom_daily),
+        "paired_observation_count": len(observations),
+        "daily_historical_observation_count": _count_daily_historical(observations),
+        "kiwoom_daily_return_count": sum(len(value) for value in kiwoom_daily.values()),
+    }
+    if len(_RELATIONSHIP_PAIR_CACHE) >= _RELATIONSHIP_PAIR_CACHE_MAX:
+        _RELATIONSHIP_PAIR_CACHE.clear()
+    _RELATIONSHIP_PAIR_CACHE[cache_key] = {"marker": marker, "analysis": analysis}
+    return analysis
+
+
+def _database_file_marker(path):
+    if not path:
+        return None
+    marker = []
+    for candidate in (path, path + "-wal"):
+        try:
+            stat = os.stat(candidate)
+            marker.append((candidate, stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            marker.append((candidate, None, None))
+    return tuple(marker)
 
 def load_latest_shared_kiwoom_market_context(shared_db_path=None, sections=None):
     shared_db_path = shared_db_path or getattr(config, "SHARED_CONTEXT_DB_PATH", None)
@@ -229,30 +299,23 @@ def _analysis_return_vectors(rows):
     target_values = []
     direction = "source_return_to_target_return"
     for row in rows:
-        payload = _parse_json(row.get("payload_json"))
-        if payload.get("driver_return_pct") is not None and payload.get("response_return_pct") is not None:
-            source_values.append(_to_float(payload.get("driver_return_pct")))
-            target_values.append(_to_float(payload.get("response_return_pct")))
-            direction = "{}_to_{}".format(
-                payload.get("driver_symbol") or "driver",
-                payload.get("response_symbol") or "response",
-            )
-        else:
-            source_values.append(_to_float(row.get("source_return_pct")))
-            target_values.append(_to_float(row.get("target_return_pct")))
+        source_value, target_value, row_direction = _relationship_return_values(row)
+        source_values.append(source_value)
+        target_values.append(target_value)
+        direction = row_direction
     return source_values, target_values, direction
 
 
 def _rolling_correlation(rows):
     dated = []
     for row in rows:
-        observed = _parse_date(row.get("observed_at"))
+        observed = row.get("_relationship_observed_at")
+        if observed is None:
+            observed = _parse_date(row.get("observed_at"))
         if observed is None:
             continue
-        source_values, target_values, _direction = _analysis_return_vectors([row])
-        if not source_values or not target_values:
-            continue
-        dated.append((observed, source_values[0], target_values[0]))
+        source_value, target_value, _direction = _relationship_return_values(row)
+        dated.append((observed, source_value, target_value))
     if not dated:
         return {
             "warning": "No dated observations available for rolling correlation.",
@@ -316,7 +379,11 @@ def _count_daily_historical(rows):
 
 
 def _is_daily_historical(row):
-    payload = _parse_json(row.get("payload_json"))
+    if "_relationship_is_daily" in row:
+        return row["_relationship_is_daily"]
+    payload = row.get("_relationship_payload")
+    if payload is None:
+        payload = _parse_json(row.get("payload_json"))
     return (
         payload.get("observation_timeframe") == "1d"
         or payload.get("resolution") == "1d"
@@ -326,7 +393,10 @@ def _is_daily_historical(row):
 
 def _resolution_summary(rows):
     daily_count = _count_daily_historical(rows)
-    payload = _parse_json((rows[-1] if rows else {}).get("payload_json"))
+    latest = rows[-1] if rows else {}
+    payload = latest.get("_relationship_payload")
+    if payload is None:
+        payload = _parse_json(latest.get("payload_json"))
     return {
         "timeframe": payload.get("observation_timeframe") or payload.get("resolution") or "unknown",
         "granularity": payload.get("observation_granularity") or "unknown",
@@ -342,20 +412,66 @@ def _parse_date(value):
     if not value:
         return None
     text = str(value).strip()
-    candidates = [text, text[:26], text[:19], text[:10]]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(candidate, fmt)
-            except ValueError:
-                continue
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+    for candidate, fmt in (
+        (text[:26], "%Y-%m-%d %H:%M:%S.%f"),
+        (text[:19], "%Y-%m-%d %H:%M:%S"),
+        (text[:10], "%Y-%m-%d"),
+    ):
         try:
-            return datetime.fromisoformat(candidate)
+            return datetime.strptime(candidate, fmt)
         except ValueError:
             continue
     return None
+
+
+def _prepare_observations(rows):
+    prepared = []
+    for row in rows or []:
+        item = dict(row)
+        if "payload_json" in item:
+            payload = _parse_json(item.get("payload_json"))
+        else:
+            payload = {
+                key: item.get(key)
+                for key in _COMPACT_PAYLOAD_KEYS
+                if item.get(key) is not None
+            }
+        item["_relationship_payload"] = payload
+        item["_relationship_observed_at"] = _parse_date(item.get("observed_at"))
+        item["_relationship_is_daily"] = (
+            payload.get("observation_timeframe") == "1d"
+            or payload.get("resolution") == "1d"
+            or payload.get("data_source") == "yahoo_history_csv"
+        )
+        prepared.append(item)
+    return prepared
+
+def _relationship_return_values(row):
+    payload = row.get("_relationship_payload")
+    if payload is None:
+        payload = _parse_json(row.get("payload_json"))
+    if payload.get("driver_return_pct") is not None and payload.get("response_return_pct") is not None:
+        return (
+            _to_float(payload.get("driver_return_pct")),
+            _to_float(payload.get("response_return_pct")),
+            "{}_to_{}".format(
+                payload.get("driver_symbol") or "driver",
+                payload.get("response_symbol") or "response",
+            ),
+        )
+    return (
+        _to_float(row.get("source_return_pct")),
+        _to_float(row.get("target_return_pct")),
+        "source_return_to_target_return",
+    )
 
 
 def _overall_regime(pair_results):

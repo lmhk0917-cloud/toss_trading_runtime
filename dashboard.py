@@ -615,10 +615,7 @@ def _shared_context_status():
         conn.execute("PRAGMA busy_timeout = 120000")
         conn.execute("PRAGMA query_only = ON")
         try:
-            quick = conn.execute("PRAGMA quick_check").fetchone()
-            if not quick or quick[0] != "ok":
-                status["status"] = "failed"
-                return status
+
             if not _shared_has_table(conn, "shared_context_snapshots"):
                 status["status"] = "missing_table"
                 status["missing_sections"] = ["shared_context_snapshots"]
@@ -713,11 +710,10 @@ def _recent_events(store, limit=24):
     rows = store.conn.execute("""
         SELECT detected_at, symbol, event_type, severity, message, value
         FROM event_logs
-        ORDER BY detected_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT ?
     """, (int(limit),)).fetchall()
     return [dict(row) for row in rows]
-
 
 def _recent_events_by_symbol(store, symbols=None, limit=12):
     result = {}

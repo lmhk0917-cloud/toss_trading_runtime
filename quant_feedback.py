@@ -4,6 +4,7 @@ This mirrors the useful parts of Kiwoom Core Quant feedback: cost-aware
 expectancy, decision buckets, and clustered samples. It never places orders.
 """
 
+import json
 from datetime import datetime, timedelta
 
 try:
@@ -21,6 +22,8 @@ SHORT_WINDOW_DAYS = 5
 MEDIUM_WINDOW_DAYS = 20
 MEDIUM_MIN_SAMPLE = 20
 ROUND_TRIP_COST_PCT = getattr(config, "PAPER_ROUND_TRIP_COST_PCT", 0.0)
+LONG_DECISIONS = set(("INTEREST", "BUY", "LONG", "관심"))
+CAUTION_DECISIONS = set(("RISK", "AVOID", "REDUCE", "SELL", "위험", "회피"))
 
 
 def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sample=DEFAULT_MIN_SAMPLE, as_of=None):
@@ -42,6 +45,22 @@ def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sam
         by_decision.append(block)
     by_decision.sort(key=lambda item: (item.get("evaluated_count") or 0, item.get("expectancy_pct") or -999), reverse=True)
 
+    by_regime = []
+    for regime in sorted(set(row.get("regime") or "UNKNOWN" for row in rows)):
+        block = _metric_block([row for row in rows if (row.get("regime") or "UNKNOWN") == regime])
+        block["regime"] = regime
+        block["guidance"] = _guidance(block, min_sample=min_sample)
+        by_regime.append(block)
+    by_regime.sort(
+        key=lambda item: (
+            item.get("directional_evaluated_count") or item.get("evaluated_count") or 0,
+            item.get("avg_net_directional_return_pct")
+            if item.get("avg_net_directional_return_pct") is not None
+            else -999,
+        ),
+        reverse=True,
+    )
+
     symbol_guidance = {}
     for item in by_symbol:
         symbol_guidance[item["symbol"]] = _guidance(item, min_sample=min_sample)
@@ -58,6 +77,7 @@ def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sam
         "overview": overview,
         "by_symbol": by_symbol,
         "by_decision": by_decision,
+        "by_regime": by_regime,
         "symbol_guidance": symbol_guidance,
         "guidance": _guidance(overview, min_sample=min_sample),
     }
@@ -166,6 +186,7 @@ def compact_quant_feedback(snapshot, symbols=None, max_items=8):
         "overview": _compact_metric(snapshot.get("overview") or {}),
         "by_symbol": by_symbol,
         "by_decision": [_compact_metric(item) for item in (snapshot.get("by_decision") or [])[:max_items]],
+        "by_regime": [_compact_metric(item) for item in (snapshot.get("by_regime") or [])[:max_items]],
         "symbol_guidance": {symbol: (snapshot.get("symbol_guidance") or {}).get(symbol) for symbol in symbols if symbol in (snapshot.get("symbol_guidance") or {})},
         "guidance": snapshot.get("guidance"),
     }
@@ -203,17 +224,72 @@ def _load_rows(conn, symbols=None, days=DEFAULT_DAYS, as_of=None):
         WHERE {where_sql}
         ORDER BY p.created_at ASC, p.id ASC
     """.format(where_sql=" AND ".join(clauses))
+    raw_rows = conn.execute(sql, params).fetchall()
+    regimes = _load_analysis_regimes(conn, [row["analysis_id"] for row in raw_rows])
     result = []
-    for row in conn.execute(sql, params).fetchall():
+    for row in raw_rows:
         item = dict(row)
         item["symbol"] = str(item.get("symbol") or "").upper()
         item["decision"] = item.get("final_decision") or "UNKNOWN"
+        item["regime"] = regimes.get(item.get("analysis_id"), "UNKNOWN")
         item["return_pct"] = _to_float(item.get("result_return_pct"))
         item["net_return_pct"] = None if item["return_pct"] is None else item["return_pct"] - float(ROUND_TRIP_COST_PCT or 0.0)
+        item["decision_side"] = _decision_side(item["decision"])
+        item["directional_return_pct"] = _directional_return(item["return_pct"], item["decision_side"])
+        item["net_directional_return_pct"] = (
+            None
+            if item["directional_return_pct"] is None
+            else item["directional_return_pct"] - float(ROUND_TRIP_COST_PCT or 0.0)
+        )
         item["mfe_pct"] = _to_float(item.get("max_return_pct"))
         item["mae_pct"] = _to_float(item.get("min_return_pct"))
         result.append(item)
     return result
+
+
+def _load_analysis_regimes(conn, analysis_ids):
+    ids = sorted(set(item for item in analysis_ids if item is not None))
+    regimes = {}
+    for start in range(0, len(ids), 500):
+        batch = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            "SELECT id, evidence_json FROM analysis_results WHERE id IN ({})".format(placeholders),
+            batch,
+        ).fetchall()
+        for row in rows:
+            regimes[row["id"]] = _relationship_regime(row["evidence_json"])
+    return regimes
+
+
+def _relationship_regime(raw_json):
+    try:
+        payload = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    relationship = payload.get("market_relationship") if isinstance(payload, dict) else None
+    if not isinstance(relationship, dict):
+        return "UNKNOWN"
+    return str(relationship.get("relationship_regime") or "UNKNOWN")
+
+
+def _decision_side(decision):
+    value = str(decision or "").strip().upper()
+    if value in LONG_DECISIONS:
+        return "long_candidate"
+    if value in CAUTION_DECISIONS:
+        return "caution_or_avoid"
+    return "neutral"
+
+
+def _directional_return(value, side):
+    if value is None:
+        return None
+    if side == "long_candidate":
+        return value
+    if side == "caution_or_avoid":
+        return -value
+    return None
 
 
 def _metric_block(rows):
@@ -224,6 +300,8 @@ def _metric_block(rows):
     clusters = _cluster_representatives(rows)
     cluster_returns = _values(clusters, "return_pct")
     cluster_net = _values(clusters, "net_return_pct")
+    directional_returns = _values(rows, "directional_return_pct")
+    net_directional_returns = _values(rows, "net_directional_return_pct")
     return {
         "evaluated_count": len(rows),
         "avg_return_pct": _avg(returns),
@@ -244,22 +322,39 @@ def _metric_block(rows):
         "avg_cluster_net_return_pct": _avg(cluster_net),
         "cluster_win_rate_pct": _win_rate(cluster_returns),
         "cluster_profit_factor": _profit_factor(cluster_returns),
+        "directional_evaluated_count": len(directional_returns),
+        "avg_directional_return_pct": _avg(directional_returns),
+        "avg_net_directional_return_pct": _avg(net_directional_returns),
+        "directional_success_pct": _win_rate(directional_returns),
+        "net_directional_success_pct": _win_rate(net_directional_returns),
+        "directional_profit_factor": _profit_factor(directional_returns),
+        "net_directional_profit_factor": _profit_factor(net_directional_returns),
+        "directional_metric_basis": "long=raw_return,caution_or_avoid=-raw_return; net subtracts round-trip cost",
     }
 
 
 def _guidance(metrics, min_sample=DEFAULT_MIN_SAMPLE):
-    count = int(metrics.get("evaluated_count") or 0)
-    expectancy = metrics.get("expectancy_pct")
-    win_rate = metrics.get("net_win_rate_pct")
-    profit_factor = metrics.get("net_profit_factor") or 0
+    directional_count = int(metrics.get("directional_evaluated_count") or 0)
+    if directional_count >= int(min_sample):
+        count = directional_count
+        expectancy = metrics.get("avg_net_directional_return_pct")
+        win_rate = metrics.get("net_directional_success_pct")
+        profit_factor = metrics.get("net_directional_profit_factor") or 0
+        basis = "net_directional"
+    else:
+        count = int(metrics.get("evaluated_count") or 0)
+        expectancy = metrics.get("expectancy_pct")
+        win_rate = metrics.get("net_win_rate_pct")
+        profit_factor = metrics.get("net_profit_factor") or 0
+        basis = "net_raw"
     adverse = metrics.get("adverse_path_rate_pct") or 0
     if count < int(min_sample):
-        return {"label": "sample_too_small", "summary": "Do not tune from this sample yet.", "sample_count": count}
+        return {"label": "sample_too_small", "summary": "Do not tune from this sample yet.", "sample_count": count, "metric_basis": basis}
     if expectancy is not None and expectancy > 0 and (win_rate or 0) >= 50 and profit_factor >= 1:
-        return {"label": "positive_expectancy", "summary": "Feedback supports keeping this setup when live evidence matches.", "sample_count": count}
+        return {"label": "positive_expectancy", "summary": "Feedback supports keeping this setup when live evidence matches.", "sample_count": count, "metric_basis": basis}
     if expectancy is not None and (expectancy < 0 or (win_rate is not None and win_rate < 45) or adverse >= 50):
-        return {"label": "negative_expectancy", "summary": "Require stronger confirmation or lower GPT confidence for this bucket.", "sample_count": count}
-    return {"label": "mixed_expectancy", "summary": "Keep as watch-only until the next feedback window clarifies.", "sample_count": count}
+        return {"label": "negative_expectancy", "summary": "Require stronger confirmation or lower GPT confidence for this bucket.", "sample_count": count, "metric_basis": basis}
+    return {"label": "mixed_expectancy", "summary": "Keep as watch-only until the next feedback window clarifies.", "sample_count": count, "metric_basis": basis}
 
 
 def _cluster_representatives(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES):
@@ -289,6 +384,10 @@ def _compact_metric(item):
         "expectancy_pct", "win_rate_pct", "net_win_rate_pct", "profit_factor",
         "net_profit_factor", "avg_mfe_pct", "avg_mae_pct", "adverse_path_rate_pct",
         "cluster_count", "avg_cluster_net_return_pct", "cluster_win_rate_pct",
+        "regime", "directional_evaluated_count", "avg_directional_return_pct",
+        "avg_net_directional_return_pct", "directional_success_pct",
+        "net_directional_success_pct", "directional_profit_factor",
+        "net_directional_profit_factor", "directional_metric_basis",
     ]
     return {key: item.get(key) for key in keys if key in item}
 

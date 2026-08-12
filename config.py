@@ -4,7 +4,39 @@ Secrets are read from environment variables only. Do not commit API keys,
 secret keys, access tokens, or account identifiers.
 """
 
+import json
 import os
+
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+WATCHLIST_ROOT = os.path.join(PROJECT_ROOT, "watchlists")
+
+
+def _load_watchlist(env_name, filename, fallback):
+    configured = os.environ.get(env_name)
+    if configured is not None:
+        return [item.strip().upper() for item in configured.split(",") if item.strip()]
+    path = os.path.join(WATCHLIST_ROOT, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        values = payload.get("symbols") if isinstance(payload, dict) else payload
+        symbols = [str(item).strip().upper() for item in values or [] if str(item).strip()]
+        if symbols:
+            return list(dict.fromkeys(symbols))
+    except (IOError, OSError, TypeError, ValueError):
+        pass
+    return list(fallback)
+
+
+def merge_watchlists(*groups):
+    merged = []
+    for group in groups:
+        for item in group or []:
+            symbol = str(item).strip().upper()
+            if symbol and symbol not in merged:
+                merged.append(symbol)
+    return merged
 
 
 BASE_URL = os.environ.get("TOSSINVEST_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -44,11 +76,22 @@ DEFAULT_WATCHLIST = [
     if item.strip()
 ]
 
-FOCUSED_NASDAQ_WATCHLIST = [
-    item.strip().upper()
-    for item in os.environ.get("TOSSINVEST_FOCUSED_NASDAQ_WATCHLIST", "MU,NVDA,AMD,AVGO,TSM,QQQ,SMH,SPY").split(",")
-    if item.strip()
-]
+FOCUSED_NASDAQ_WATCHLIST = _load_watchlist(
+    "TOSSINVEST_FOCUSED_NASDAQ_WATCHLIST",
+    "us_focus.json",
+    ["MU", "NVDA", "AMD", "AVGO", "MRVL", "ARM", "TSM", "ORCL", "CRWV", "PLTR", "QQQ", "SMH"],
+)
+
+US_MARKET_CONTEXT_WATCHLIST = _load_watchlist(
+    "TOSSINVEST_US_MARKET_CONTEXT_WATCHLIST",
+    "us_context.json",
+    ["SPY"],
+)
+
+US_COLLECTION_WATCHLIST = merge_watchlists(
+    FOCUSED_NASDAQ_WATCHLIST,
+    US_MARKET_CONTEXT_WATCHLIST,
+)
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
 

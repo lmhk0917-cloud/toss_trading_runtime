@@ -29,6 +29,7 @@ DEFAULT_REPORT_DIR = os.path.join(
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run focused collection, GPT analysis, and ops report in sequence.")
     parser.add_argument("--symbols", default=",".join(config.FOCUSED_NASDAQ_WATCHLIST))
+    parser.add_argument("--context-symbols", default=",".join(config.US_MARKET_CONTEXT_WATCHLIST))
     parser.add_argument("--collect-minutes", type=int, default=1)
     parser.add_argument("--until-kst", default=None)
     parser.add_argument("--interval-sec", type=int, default=30)
@@ -41,6 +42,10 @@ def main(argv=None):
     parser.add_argument("--skip-env-file", action="store_true")
     args = parser.parse_args(argv)
 
+    analysis_symbols = _parse_symbols(args.symbols)
+    context_symbols = _parse_symbols(args.context_symbols)
+    collection_symbols = config.merge_watchlists(analysis_symbols, context_symbols)
+
     if not args.skip_env_file:
         load_local_env()
 
@@ -51,7 +56,7 @@ def main(argv=None):
 
     supervisor_summary = os.path.abspath(os.path.join(args.report_dir, "supervisor_latest.json"))
     supervisor_args = [
-        "--symbols", args.symbols,
+        "--symbols", ",".join(collection_symbols),
         "--interval-sec", str(args.interval_sec),
         "--minute-count", str(args.minute_count),
         "--daily-count", str(args.daily_count),
@@ -84,7 +89,7 @@ def main(argv=None):
 
     if not args.skip_gpt:
         focused_args = [
-            "--symbols", args.symbols,
+            "--symbols", ",".join(analysis_symbols),
             "--minute-count", str(args.minute_count),
             "--daily-count", str(args.daily_count),
             "--max-tokens", str(args.max_tokens),
@@ -136,11 +141,15 @@ def main(argv=None):
 
 
 def _new_session(args):
+    analysis_symbols = _parse_symbols(args.symbols)
+    context_symbols = _parse_symbols(getattr(args, "context_symbols", ""))
     return {
         "status": "running",
         "started_at": _now(),
         "finished_at": None,
-        "symbols": [item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+        "symbols": analysis_symbols,
+        "context_symbols": context_symbols,
+        "collection_symbols": config.merge_watchlists(analysis_symbols, context_symbols),
         "settings": {
             "collect_minutes": args.collect_minutes,
             "until_kst": args.until_kst,
@@ -154,6 +163,10 @@ def _new_session(args):
         },
         "stages": [],
     }
+
+
+def _parse_symbols(value):
+    return config.merge_watchlists(str(value or "").split(","))
 
 
 def _run_stage(session, session_path, name, fn, argv, continue_on_codes=(0,)):

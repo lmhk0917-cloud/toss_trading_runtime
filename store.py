@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover
 
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "toss_runtime.db")
+OPS_EVENT_SAMPLE_LIMIT = 50000
 
 
 class TossRuntimeStore(object):
@@ -818,16 +819,7 @@ class TossRuntimeStore(object):
             {"status": row["status"], "count": row["count"]}
             for row in self.conn.execute("SELECT status, COUNT(1) AS count FROM paper_trade_candidates GROUP BY status").fetchall()
         ]
-        top_events = [
-            {"event_type": row["event_type"], "count": row["count"]}
-            for row in self.conn.execute("""
-                SELECT event_type, COUNT(1) AS count
-                FROM event_logs
-                GROUP BY event_type
-                ORDER BY count DESC
-                LIMIT 10
-            """).fetchall()
-        ]
+        top_events = self._recent_top_events()
         return {
             "db_path": os.path.abspath(self.db_path),
             "tables": tables,
@@ -835,11 +827,34 @@ class TossRuntimeStore(object):
             "latest_analysis": dict(latest_analysis) if latest_analysis else None,
             "paper_status": paper_status,
             "top_events": top_events,
+            "top_events_scope": {
+                "basis": "recent_rows",
+                "row_limit": OPS_EVENT_SAMPLE_LIMIT,
+            },
             "paper_feedback": self.paper_feedback_summary(),
             "quant_feedback": build_quant_feedback_snapshot(self.conn),
             "deployment_readiness": self.paper_execution_readiness(),
             "health": build_runtime_health(self),
         }
+
+    def _recent_top_events(self, row_limit=OPS_EVENT_SAMPLE_LIMIT, result_limit=10):
+        """Summarize a bounded recent event window for responsive ops refreshes."""
+        rows = self.conn.execute("""
+            SELECT event_type, COUNT(1) AS count
+            FROM (
+                SELECT event_type
+                FROM event_logs
+                ORDER BY id DESC
+                LIMIT ?
+            ) AS recent_events
+            GROUP BY event_type
+            ORDER BY count DESC, event_type ASC
+            LIMIT ?
+        """, (int(row_limit), int(result_limit))).fetchall()
+        return [
+            {"event_type": row["event_type"], "count": row["count"]}
+            for row in rows
+        ]
 
     def upsert_domestic_feedback_summary(self, rows):
         imported_at = _now()
@@ -1006,7 +1021,7 @@ class TossRuntimeStore(object):
         self._commit()
         return cursor.rowcount
 
-    def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=100000):
+    def relationship_observations(self, domestic_codes=None, us_symbols=None, limit=100000, compact=False):
         domestic_codes = [str(item).strip() for item in domestic_codes or [] if str(item).strip()]
         us_symbols = [str(item).strip().upper() for item in us_symbols or [] if str(item).strip()]
         clauses = []
@@ -1018,16 +1033,51 @@ class TossRuntimeStore(object):
             clauses.append("target_symbol IN ({})".format(",".join("?" for _ in us_symbols)))
             params.extend(us_symbols)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        columns = "*"
+        if compact:
+            columns = """
+                id, observed_at, source_market, source_symbol, target_market,
+                target_symbol, source_return_pct, target_return_pct, lag_label,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.driver_return_pct') END AS driver_return_pct,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.response_return_pct') END AS response_return_pct,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.driver_symbol') END AS driver_symbol,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.response_symbol') END AS response_symbol,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.observation_timeframe') END AS observation_timeframe,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.resolution') END AS resolution,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.data_source') END AS data_source,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.observation_granularity') END AS observation_granularity,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.intraday_source') END AS intraday_source,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.tick_source') END AS tick_source,
+                CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.resolution_warning') END AS resolution_warning
+            """
         params.append(int(limit))
         rows = self.conn.execute("""
-            SELECT *
+            SELECT {columns}
             FROM market_relationship_observations
             {where}
             ORDER BY observed_at DESC, id DESC
             LIMIT ?
-        """.format(where=where), params).fetchall()
+        """.format(columns=columns, where=where), params).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def relationship_observation_marker(self, domestic_codes=None, us_symbols=None):
+        domestic_codes = [str(item).strip() for item in domestic_codes or [] if str(item).strip()]
+        us_symbols = [str(item).strip().upper() for item in us_symbols or [] if str(item).strip()]
+        clauses = []
+        params = []
+        if domestic_codes:
+            clauses.append("source_symbol IN ({})".format(",".join("?" for _ in domestic_codes)))
+            params.extend(domestic_codes)
+        if us_symbols:
+            clauses.append("target_symbol IN ({})".format(",".join("?" for _ in us_symbols)))
+            params.extend(us_symbols)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        row = self.conn.execute("""
+            SELECT COUNT(1) AS row_count, MAX(id) AS max_id, MAX(observed_at) AS latest_observed_at
+            FROM market_relationship_observations
+            {where}
+        """.format(where=where), params).fetchone()
+        return tuple(row) if row else (0, None, None)
     def save_trade_ticks(self, symbol, trades_payload, collected_at=None, source="toss_trades"):
         collected_at = collected_at or _now()
         symbol = str(symbol or "").upper()
