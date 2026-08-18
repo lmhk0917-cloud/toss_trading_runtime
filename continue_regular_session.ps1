@@ -1,5 +1,6 @@
 param(
-    [string]$Symbols = "MU,NVDA,AMD,AVGO,MRVL,ARM,TSM,ORCL,CRWV,PLTR,QQQ,SMH",
+    [string]$Symbols = "",
+    [string]$ContextSymbols = "",
     [string]$StartKst = "22:31",
     [string]$UntilKst = "05:00",
     [int[]]$WaitForPid = @(),
@@ -16,6 +17,29 @@ $Pythonw = "C:\Users\lmhk2\anaconda3\pythonw.exe"
 $ReportsDir = Join-Path $RuntimeDir "reports"
 $LogDir = Join-Path $ReportsDir "run_logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Resolve-WatchlistSymbols([string]$Provided, [string]$FileName, [string]$Fallback) {
+    if ($Provided -and $Provided.Trim()) {
+        return $Provided.Trim()
+    }
+    $path = Join-Path (Join-Path $RuntimeDir "watchlists") $FileName
+    try {
+        $payload = Get-Content -Raw -Path $path | ConvertFrom-Json
+        $values = @($payload.symbols | ForEach-Object { "$_".Trim().ToUpperInvariant() } | Where-Object { $_ })
+        if ($values.Count -gt 0) {
+            return ($values -join ",")
+        }
+    } catch {
+    }
+    return $Fallback
+}
+
+$Symbols = Resolve-WatchlistSymbols $Symbols "us_focus.json" "MU,NVDA,AMD,AVGO,MRVL,ARM,TSM,ORCL,CRWV,PLTR,QQQ,SMH"
+$ContextSymbols = Resolve-WatchlistSymbols $ContextSymbols "us_context.json" "SPY"
+$CollectionSymbols = ((($Symbols + "," + $ContextSymbols).Split(",")) |
+    ForEach-Object { $_.Trim().ToUpperInvariant() } |
+    Where-Object { $_ } |
+    Select-Object -Unique) -join ","
 
 function Resolve-TargetTime([string]$hhmm) {
     $parts = $hhmm.Split(":")
@@ -42,7 +66,7 @@ foreach ($pidText in $WaitForPidCsv.Split(",")) {
 }
 $waitPids = @($waitPids | Select-Object -Unique)
 $watcherLog = Join-Path $LogDir "regular_session_watcher_latest.log"
-"REGULAR_WATCHER_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') START=$($startAt.ToString('yyyy-MM-dd HH:mm:ss')) SYMBOLS=$Symbols WAIT_FOR=$($waitPids -join ',')" |
+"REGULAR_WATCHER_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') START=$($startAt.ToString('yyyy-MM-dd HH:mm:ss')) SYMBOLS=$Symbols CONTEXT_SYMBOLS=$ContextSymbols COLLECTION_SYMBOLS=$CollectionSymbols WAIT_FOR=$($waitPids -join ',')" |
     Out-File -FilePath $watcherLog -Encoding utf8
 
 while ((Get-Date) -lt $startAt) {
@@ -80,6 +104,7 @@ $tickIterations = [Math]::Max(1, [int][Math]::Ceiling($seconds / 60))
 $marketArgs = @(
     "-u", "-m", "toss_trading_runtime.market_session_run",
     "--symbols", $Symbols,
+    "--context-symbols", $ContextSymbols,
     "--until-kst", $UntilKst,
     "--interval-sec", "60",
     "--minute-count", "120",
@@ -88,7 +113,7 @@ $marketArgs = @(
 )
 $tickArgs = @(
     "-u", "-m", "toss_trading_runtime.tick_collector",
-    "--symbols", $Symbols,
+    "--symbols", $CollectionSymbols,
     "--iterations", "$tickIterations",
     "--interval-sec", "60",
     "--trade-count", "50"
@@ -117,6 +142,8 @@ if (-not $SkipUi) {
 @(
     "REGULAR_SESSION_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
     "SYMBOLS=$Symbols",
+    "CONTEXT_SYMBOLS=$ContextSymbols",
+    "COLLECTION_SYMBOLS=$CollectionSymbols",
     "MARKET_PID=$($market.Id)",
     "TICK_PID=$($tick.Id)",
     "GPT_PID=$($gpt.Id)",

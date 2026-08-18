@@ -1,7 +1,6 @@
 """Generate an operational report from Toss runtime DB."""
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime
@@ -16,17 +15,28 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Print or write Toss runtime operational summary.")
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--html", default=None)
+    parser.add_argument("--integrity-check", action="store_true")
     args = parser.parse_args(argv)
 
-    store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
+    store = TossRuntimeStore(db_path=args.db_path, read_only=True) if args.db_path else TossRuntimeStore(read_only=True)
     try:
         summary = store.operational_summary()
+        if args.integrity_check:
+            row = store.conn.execute("PRAGMA quick_check").fetchone()
+            summary["integrity_check"] = row[0] if row else "missing_result"
     finally:
         store.close()
 
     print("TOSS_OPS_DB={}".format(summary["db_path"]))
     for table, count in sorted(summary["tables"].items()):
         print("TOSS_OPS_TABLE_{}={}".format(table, count))
+    if "integrity_check" in summary:
+        print("TOSS_OPS_INTEGRITY_CHECK={}".format(summary["integrity_check"]))
+    event_scope = summary.get("top_events_scope") or {}
+    print("TOSS_OPS_TOP_EVENTS_SCOPE={}:{}".format(
+        event_scope.get("basis") or "unknown",
+        event_scope.get("row_limit") or 0,
+    ))
     latest = summary.get("latest_analysis") or {}
     if latest:
         print("TOSS_OPS_LATEST_ANALYSIS={} SYMBOLS={} TOKENS={}".format(
@@ -72,17 +82,21 @@ def _html(summary):
 <h1>Toss Runtime Ops</h1>
 <p>Generated at {now}</p>
 <p>DB: {db}</p>
-<h2>Health</h2><p>Status: {health_status}</p><table>{checks}</table><ul>{warnings}</ul>
+<h2>Health</h2><p>Status: {health_status}</p><p>Integrity: {integrity}</p><table>{checks}</table><ul>{warnings}</ul>
 <h2>Tables</h2><table>{table_rows}</table>
-<h2>Top Events</h2><ul>{events}</ul>
+<h2>Top Events</h2><p>{event_scope}</p><ul>{events}</ul>
 <h2>Paper Feedback</h2><ul>{feedback}</ul>
 </body></html>""".format(
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         db=summary.get("db_path"),
         health_status=health.get("status"),
+        integrity=summary.get("integrity_check", "not_run"),
         checks=checks,
         warnings=warnings,
         table_rows=table_rows,
+        event_scope="Recent {:,} rows maximum".format(
+            int((summary.get("top_events_scope") or {}).get("row_limit") or 0)
+        ),
         events=events,
         feedback=feedback,
     )

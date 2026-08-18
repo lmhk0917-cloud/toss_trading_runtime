@@ -9,8 +9,11 @@ from datetime import datetime
 
 try:
     from . import config
+    from .quant_feedback import build_quant_feedback_snapshot
 except ImportError:  # pragma: no cover
     import config
+    from quant_feedback import build_quant_feedback_snapshot
+
 
 
 DEFAULT_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
@@ -24,7 +27,7 @@ DEFAULT_KIWOOM_ROOTS = [
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate Toss post-close review markdown.")
-    parser.add_argument("--symbols", default="MU,NVDA,QQQ")
+    parser.add_argument("--symbols", default=",".join(config.FOCUSED_NASDAQ_WATCHLIST))
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
     parser.add_argument("--reports-dir", default=DEFAULT_REPORTS_DIR)
     parser.add_argument("--latest-name", default="post_close_review_latest.md")
@@ -117,6 +120,7 @@ def build_review(db_path, reports_dir, symbols):
             ).fetchall()
         ]
         pending_paper = _scalar(con, "SELECT COUNT(1) FROM paper_trade_candidates WHERE status='pending'")
+        quant_feedback = build_quant_feedback_snapshot(con, symbols=symbols)
     finally:
         con.close()
 
@@ -167,6 +171,53 @@ def build_review(db_path, reports_dir, symbols):
             )
     else:
         lines.append("- no evaluated paper feedback yet")
+    lines.append("")
+    lines.append("## Quant Feedback")
+    lines.append("")
+    q_overview = quant_feedback.get("overview") or {}
+    q_guidance = quant_feedback.get("guidance") or {}
+    lines.append("- label: {}".format(q_guidance.get("label", "none")))
+    lines.append("- summary: {}".format(q_guidance.get("summary", "none")))
+    lines.append("- round_trip_cost_pct: {}".format(quant_feedback.get("round_trip_cost_pct")))
+    lines.append("- evaluated_count: {}".format(q_overview.get("evaluated_count")))
+    lines.append("- expectancy_pct: {}".format(q_overview.get("expectancy_pct")))
+    lines.append("- net_win_rate_pct: {}".format(q_overview.get("net_win_rate_pct")))
+    lines.append("- net_profit_factor: {}".format(q_overview.get("net_profit_factor")))
+    lines.append("- directional_evaluated_count: {}".format(q_overview.get("directional_evaluated_count")))
+    lines.append("- avg_net_directional_return_pct: {}".format(q_overview.get("avg_net_directional_return_pct")))
+    lines.append("- net_directional_success_pct: {}".format(q_overview.get("net_directional_success_pct")))
+    lines.append("- net_directional_profit_factor: {}".format(q_overview.get("net_directional_profit_factor")))
+    lines.append("")
+    for row in quant_feedback.get("by_symbol") or []:
+        guidance = (quant_feedback.get("symbol_guidance") or {}).get(row.get("symbol"), {})
+        lines.append("- {symbol}: samples={evaluated_count} exp={expectancy_pct}% net_win={net_win_rate_pct}% pf={net_profit_factor} label={label}".format(
+            symbol=row.get("symbol"),
+            evaluated_count=row.get("evaluated_count"),
+            expectancy_pct=row.get("expectancy_pct"),
+            net_win_rate_pct=row.get("net_win_rate_pct"),
+            net_profit_factor=row.get("net_profit_factor"),
+            label=guidance.get("label", "none"),
+        ))
+    lines.append("")
+    lines.append("## Regime Profitability")
+    lines.append("")
+    for row in quant_feedback.get("by_regime") or []:
+        regime_guidance = row.get("guidance") or {}
+        lines.append(
+            "- {regime}: directional_samples={directional_evaluated_count} "
+            "net_directional={avg_net_directional_return_pct}% "
+            "directional_win={net_directional_success_pct}% "
+            "directional_pf={net_directional_profit_factor} label={label}".format(
+                regime=row.get("regime"),
+                directional_evaluated_count=row.get("directional_evaluated_count"),
+                avg_net_directional_return_pct=row.get("avg_net_directional_return_pct"),
+                net_directional_success_pct=row.get("net_directional_success_pct"),
+                net_directional_profit_factor=row.get("net_directional_profit_factor"),
+                label=regime_guidance.get("label"),
+            )
+        )
+    if not quant_feedback.get("by_regime"):
+        lines.append("- no regime-tagged feedback yet")
     lines.append("")
     lines.append("## Top Events")
     lines.append("")
@@ -305,3 +356,5 @@ def _scalar(con, query, params=()):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+

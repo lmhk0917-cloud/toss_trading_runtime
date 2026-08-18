@@ -4,7 +4,39 @@ Secrets are read from environment variables only. Do not commit API keys,
 secret keys, access tokens, or account identifiers.
 """
 
+import json
 import os
+
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+WATCHLIST_ROOT = os.path.join(PROJECT_ROOT, "watchlists")
+
+
+def _load_watchlist(env_name, filename, fallback):
+    configured = os.environ.get(env_name)
+    if configured is not None:
+        return [item.strip().upper() for item in configured.split(",") if item.strip()]
+    path = os.path.join(WATCHLIST_ROOT, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        values = payload.get("symbols") if isinstance(payload, dict) else payload
+        symbols = [str(item).strip().upper() for item in values or [] if str(item).strip()]
+        if symbols:
+            return list(dict.fromkeys(symbols))
+    except (IOError, OSError, TypeError, ValueError):
+        pass
+    return list(fallback)
+
+
+def merge_watchlists(*groups):
+    merged = []
+    for group in groups:
+        for item in group or []:
+            symbol = str(item).strip().upper()
+            if symbol and symbol not in merged:
+                merged.append(symbol)
+    return merged
 
 
 BASE_URL = os.environ.get("TOSSINVEST_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -44,13 +76,56 @@ DEFAULT_WATCHLIST = [
     if item.strip()
 ]
 
-FOCUSED_NASDAQ_WATCHLIST = [
-    item.strip().upper()
-    for item in os.environ.get("TOSSINVEST_FOCUSED_NASDAQ_WATCHLIST", "MU,NVDA,AMD,AVGO,TSM,QQQ,SMH,SPY").split(",")
-    if item.strip()
-]
+FOCUSED_NASDAQ_WATCHLIST = _load_watchlist(
+    "TOSSINVEST_FOCUSED_NASDAQ_WATCHLIST",
+    "us_focus.json",
+    ["MU", "NVDA", "AMD", "AVGO", "MRVL", "ARM", "TSM", "ORCL", "CRWV", "PLTR", "QQQ", "SMH"],
+)
+
+US_MARKET_CONTEXT_WATCHLIST = _load_watchlist(
+    "TOSSINVEST_US_MARKET_CONTEXT_WATCHLIST",
+    "us_context.json",
+    ["SPY"],
+)
+
+US_COLLECTION_WATCHLIST = merge_watchlists(
+    FOCUSED_NASDAQ_WATCHLIST,
+    US_MARKET_CONTEXT_WATCHLIST,
+)
 
 ENABLE_TEMP_SCREENING = os.environ.get("TOSSINVEST_ENABLE_TEMP_SCREENING", "0").strip() in ("1", "true", "yes")
+
+# US stock paper-cost assumptions. Toss currently publishes a 0.1% US stock
+# commission per side. Slippage and regulatory values are conservative research
+# buffers, not broker quotes. FX is excluded by default because returns are
+# measured in USD; set a buffer when a KRW conversion is part of the strategy.
+US_STOCK_COMMISSION_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_COMMISSION_PCT", "0.10"))
+US_STOCK_SLIPPAGE_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_SLIPPAGE_PCT", "0.05"))
+US_STOCK_REGULATORY_BUFFER_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_REGULATORY_BUFFER_PCT", "0.01"))
+US_STOCK_FX_ROUND_TRIP_BUFFER_PCT = float(os.environ.get("TOSSINVEST_US_STOCK_FX_ROUND_TRIP_BUFFER_PCT", "0.0"))
+_PAPER_ROUND_TRIP_COST_OVERRIDE = os.environ.get("TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT")
+PAPER_ROUND_TRIP_COST_PCT = (
+    float(_PAPER_ROUND_TRIP_COST_OVERRIDE)
+    if _PAPER_ROUND_TRIP_COST_OVERRIDE not in (None, "")
+    else (
+        US_STOCK_COMMISSION_PCT * 2
+        + US_STOCK_SLIPPAGE_PCT * 2
+        + US_STOCK_REGULATORY_BUFFER_PCT
+        + US_STOCK_FX_ROUND_TRIP_BUFFER_PCT
+    )
+)
+PAPER_COST_SOURCE = (
+    "TOSSINVEST_PAPER_ROUND_TRIP_COST_PCT override"
+    if _PAPER_ROUND_TRIP_COST_OVERRIDE not in (None, "")
+    else "Toss official 0.1% commission per side plus configurable simulation buffers"
+)
+
+# Trade-plan gates prepare paper/shadow validation only. They cannot enable
+# orders and deliberately stop short of producing a live-trading candidate.
+TRADE_PLAN_MIN_ENTRY_SCORE = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_ENTRY_SCORE", "75"))
+TRADE_PLAN_MIN_FEEDBACK_SAMPLES = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_FEEDBACK_SAMPLES", "20"))
+TRADE_PLAN_MIN_NET_RR = float(os.environ.get("TOSSINVEST_TRADE_PLAN_MIN_NET_RR", "1.20"))
+TRADE_PLAN_MAX_HOLD_MINUTES = int(os.environ.get("TOSSINVEST_TRADE_PLAN_MAX_HOLD_MINUTES", "60"))
 
 KIWOOM_DB_CANDIDATES = [
     r"C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab\data\ticks.db",
@@ -100,3 +175,4 @@ def missing_secret_names():
         if not os.environ.get(name):
             missing.append(name)
     return missing
+

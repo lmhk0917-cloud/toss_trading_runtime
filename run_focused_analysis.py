@@ -10,28 +10,42 @@ try:
     from . import config
     from .analysis_history import attach_previous_analysis_context, build_previous_analysis_context, compare_structured_to_previous
     from .client import TossInvestClient
+    from .decision_calibration import calibrate_structured_analysis
     from .env_loader import load_local_env
     from .event_detector import detect_events
     from .feedback import attach_feedback_adjustments
+    from .quant_feedback import (
+        attach_quant_feedback_to_evidence,
+        attach_quant_feedback_windows_to_evidence,
+        build_quant_feedback_windows,
+    )
     from .focused_analysis import collect_focused_evidence
     from .openai_gpt import OPENAI_API_KEY_ENV, TossGptAnalyzer
     from .relationship_analysis import build_relationship_evidence
     from .security import sanitize_payload
     from .store import TossRuntimeStore
     from .structured_analysis import extract_structured_analysis
+    from .trade_plan import attach_trade_plans
 except ImportError:  # pragma: no cover
     import config
     from analysis_history import attach_previous_analysis_context, build_previous_analysis_context, compare_structured_to_previous
     from client import TossInvestClient
+    from decision_calibration import calibrate_structured_analysis
     from env_loader import load_local_env
     from event_detector import detect_events
     from feedback import attach_feedback_adjustments
+    from quant_feedback import (
+        attach_quant_feedback_to_evidence,
+        attach_quant_feedback_windows_to_evidence,
+        build_quant_feedback_windows,
+    )
     from focused_analysis import collect_focused_evidence
     from openai_gpt import OPENAI_API_KEY_ENV, TossGptAnalyzer
     from relationship_analysis import build_relationship_evidence
     from security import sanitize_payload
     from store import TossRuntimeStore
     from structured_analysis import extract_structured_analysis
+    from trade_plan import attach_trade_plans
 
 
 def main(argv=None):
@@ -67,6 +81,7 @@ def main(argv=None):
         return_feedback = store.return_feedback_by_symbol()
         previous_context = build_previous_analysis_context(store.latest_structured_by_symbol(symbols))
         relationship_evidence = build_relationship_evidence(store, us_symbols=symbols)
+        quant_feedback_windows = build_quant_feedback_windows(store.conn, symbols=symbols)
     finally:
         store.close()
 
@@ -79,6 +94,11 @@ def main(argv=None):
     )
     evidence["paper_feedback_summary"] = paper_feedback
     evidence["return_feedback_by_symbol"] = return_feedback
+    evidence = attach_quant_feedback_to_evidence(
+        evidence,
+        quant_feedback_windows["short_5d"],
+    )
+    evidence = attach_quant_feedback_windows_to_evidence(evidence, quant_feedback_windows)
     evidence["market_relationship"] = relationship_evidence
     evidence = attach_feedback_adjustments(evidence, paper_feedback)
     evidence = attach_previous_analysis_context(evidence, previous_context)
@@ -106,6 +126,8 @@ def main(argv=None):
     events = detect_events(evidence)
     gpt = analyzer.analyze_focused_evidence(evidence, symbols=symbols)
     structured = extract_structured_analysis(gpt.get("analysis"), symbols)
+    structured = calibrate_structured_analysis(structured, evidence)
+    structured = attach_trade_plans(structured, evidence)
     structured_comparison = compare_structured_to_previous(structured, previous_context)
     store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
     try:
@@ -113,8 +135,15 @@ def main(argv=None):
             store.save_evidence(evidence, events=events)
         analysis_id = store.save_analysis_result(evidence, gpt, events=events)
         store.save_structured_analysis(analysis_id, structured)
+        paper_orders_created = store.create_paper_execution_orders(
+            analysis_id,
+            structured,
+            created_at=evidence.get("collected_at"),
+        )
         paper_candidates = store.create_paper_candidates(analysis_id, evidence)
         paper_evaluated = store.evaluate_due_paper_candidates()
+        paper_execution_advanced = store.advance_paper_execution_orders()
+        deployment_readiness = store.paper_execution_readiness()
         db_path = os.path.abspath(store.db_path)
     finally:
         store.close()
@@ -133,6 +162,9 @@ def main(argv=None):
             "evidence_saved": not args.skip_evidence_save,
             "paper_candidates_created": paper_candidates,
             "paper_candidates_evaluated": paper_evaluated,
+            "paper_orders_created": paper_orders_created,
+            "paper_execution_advanced": paper_execution_advanced,
+            "deployment_readiness": deployment_readiness,
         },
         "safety": {
             "orders_called": False,
@@ -164,3 +196,4 @@ def _now():
 
 if __name__ == "__main__":
     sys.exit(main())
+

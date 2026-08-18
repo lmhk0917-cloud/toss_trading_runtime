@@ -9,13 +9,13 @@ from datetime import datetime
 
 try:
     from . import config
-    from .client import TossInvestClient, TossInvestClientError
+    from .client import TossInvestClient
     from .env_loader import load_local_env
     from .store import TossRuntimeStore
     from .tick_analysis import analyze_tick_flow, tick_events_from_analysis
 except ImportError:  # pragma: no cover
     import config
-    from client import TossInvestClient, TossInvestClientError
+    from client import TossInvestClient
     from env_loader import load_local_env
     from store import TossRuntimeStore
     from tick_analysis import analyze_tick_flow, tick_events_from_analysis
@@ -36,8 +36,16 @@ def main(argv=None):
     parser.add_argument("--trade-count", type=int, default=50)
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--summary-json", default=DEFAULT_SUMMARY_PATH)
+    parser.add_argument("--finalize-summary-only", action="store_true")
+    parser.add_argument("--stop-reason", default="external_stop")
     parser.add_argument("--skip-env-file", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.finalize_summary_only:
+        summary = _finalize_summary(args.summary_json, stop_reason=args.stop_reason)
+        print("TOSS_TICK_COLLECTOR_STATUS={}".format(summary.get("status", "missing")))
+        print("TOSS_TICK_COLLECTOR_SUMMARY={}".format(os.path.abspath(args.summary_json)))
+        return 0
 
     if not args.skip_env_file:
         load_local_env()
@@ -73,6 +81,8 @@ def main(argv=None):
                     len(iteration.get("errors") or []),
                 )
             )
+            for error in iteration.get("errors") or []:
+                print("TOSS_TICK_COLLECTOR_ERROR={} {}".format(index + 1, _compact_error(error)))
             summary["latest_iteration"] = iteration
             summary["updated_at"] = _now()
             summary["status"] = "running"
@@ -167,6 +177,33 @@ def _write_summary(path, payload):
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     os.replace(tmp_path, path)
+
+
+def _finalize_summary(path, stop_reason="external_stop"):
+    path = os.path.abspath(path)
+    summary = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                summary = loaded
+        except (OSError, ValueError):
+            summary = {}
+    if summary.get("status") in (None, "", "running"):
+        summary["status"] = "stopped"
+        summary["finished_at"] = _now()
+        summary["updated_at"] = summary["finished_at"]
+        summary["stop_reason"] = str(stop_reason or "external_stop")
+        _write_summary(path, summary)
+    return summary
+
+
+def _compact_error(value, limit=500):
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _now():

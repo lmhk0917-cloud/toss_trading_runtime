@@ -1,6 +1,7 @@
 param(
     [string]$StopKst = "05:08",
-    [string]$Symbols = "MU,NVDA,QQQ"
+    [string]$Symbols = "",
+    [switch]$RunNowIfPast
 )
 
 $ErrorActionPreference = "Continue"
@@ -11,12 +12,29 @@ $ReportsDir = Join-Path $RuntimeDir "reports"
 $LogDir = Join-Path $ReportsDir "run_logs"
 New-Item -ItemType Directory -Force -Path $ReportsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Set-Location -LiteralPath $Root
+
+if (-not $Symbols.Trim()) {
+    $watchlistPath = Join-Path (Join-Path $RuntimeDir "watchlists") "us_focus.json"
+    try {
+        $watchlist = Get-Content -Raw -Path $watchlistPath | ConvertFrom-Json
+        $Symbols = (@($watchlist.symbols) | ForEach-Object { "$($_)".Trim().ToUpperInvariant() } | Where-Object { $_ }) -join ","
+    } catch {
+        $Symbols = ""
+    }
+}
+if (-not $Symbols) {
+    $Symbols = "MU,NVDA,AMD,AVGO,MRVL,ARM,TSM,ORCL,CRWV,PLTR,QQQ,SMH"
+}
 
 function Resolve-TargetTime([string]$hhmm) {
     $parts = $hhmm.Split(":")
     $now = Get-Date
     $target = Get-Date -Hour ([int]$parts[0]) -Minute ([int]$parts[1]) -Second 0
     if ($target -le $now) {
+        if ($RunNowIfPast) {
+            return $now
+        }
         $target = $target.AddDays(1)
     }
     return $target
@@ -34,9 +52,11 @@ $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $postLog = Join-Path $LogDir "post_close_finalize_$stamp.log"
 "POST_CLOSE_FINALIZE_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $postLog -Encoding utf8
 
+$runtimeModulePattern = 'toss_trading_runtime\.(market_session_run|tick_collector|periodic_gpt_loop|dashboard_window)'
 $runtimeProcesses = Get-CimInstance Win32_Process |
     Where-Object {
-        $_.CommandLine -like "*toss_trading_runtime*" -and
+        $_.Name -like "python*.exe" -and
+        $_.CommandLine -match $runtimeModulePattern -and
         $_.ProcessId -ne $PID -and
         $_.ProcessId -ne $null
     }
@@ -46,8 +66,10 @@ foreach ($proc in $runtimeProcesses) {
     Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
+& $Python -m toss_trading_runtime.tick_collector --finalize-summary-only --stop-reason post_close_finalize *>> $postLog
+
 & $Python -m toss_trading_runtime.dashboard --symbols $Symbols --html (Join-Path $ReportsDir "dashboard_latest.html") *>> $postLog
-& $Python -m toss_trading_runtime.ops_report --html (Join-Path $ReportsDir "ops_latest.html") *>> $postLog
+& $Python -m toss_trading_runtime.ops_report --integrity-check --html (Join-Path $ReportsDir "ops_latest.html") *>> $postLog
 & $Python -m toss_trading_runtime.post_close_review --symbols $Symbols *>> $postLog
 & $Python -m toss_trading_runtime.export_to_shared_context *>> $postLog
 "POST_CLOSE_FINALIZE_FINISHED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $postLog -Append -Encoding utf8

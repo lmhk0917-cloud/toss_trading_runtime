@@ -11,10 +11,12 @@ PROJECT_ROOT = os.path.dirname(ROOT)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from toss_trading_runtime import config
 from toss_trading_runtime.client import TossInvestClient, TossInvestClientError
 from toss_trading_runtime.analysis_history import attach_previous_analysis_context, build_previous_analysis_context, compare_structured_to_previous
 from toss_trading_runtime.dashboard import build_dashboard_snapshot, format_summary_text, render_dashboard_html
 from toss_trading_runtime.dashboard_window import load_symbols, save_symbols, save_watchlist_file
+from toss_trading_runtime.decision_calibration import calibrate_structured_analysis
 from toss_trading_runtime.domestic_analysis import collect_domestic_evidence
 from toss_trading_runtime.domestic_import import load_kiwoom_summaries
 from toss_trading_runtime.evidence import collect_read_only_evidence
@@ -24,15 +26,28 @@ from toss_trading_runtime.feedback import attach_feedback_adjustments, build_fee
 from toss_trading_runtime.market_calendar import current_kr_session, current_us_session
 from toss_trading_runtime.openai_gpt import TossGptAnalyzer, TossGptError
 from toss_trading_runtime.order_safety import TossOrderSafetyGate
-from toss_trading_runtime.relationship_analysis import build_relationship_evidence, load_latest_shared_kiwoom_market_context
+from toss_trading_runtime.quant_feedback import attach_quant_feedback_to_evidence, build_quant_feedback_snapshot, compact_quant_feedback
+import toss_trading_runtime.relationship_analysis as relationship_module
+from toss_trading_runtime.relationship_analysis import _parse_date, build_relationship_evidence, load_latest_shared_kiwoom_market_context
 from toss_trading_runtime.runtime_health import build_runtime_health
+from toss_trading_runtime.security import sanitize_payload
 from toss_trading_runtime.screener import score_symbol
 from toss_trading_runtime.store import TossRuntimeStore
 from toss_trading_runtime.structured_analysis import extract_structured_analysis
 from toss_trading_runtime.supervisor import _summary_payload, _resolve_stop_time
 from toss_trading_runtime.market_session_run import _new_session, _run_stage
 from toss_trading_runtime.tick_analysis import analyze_tick_flow, tick_events_from_analysis
-from toss_trading_runtime.tick_collector import _collect_iteration
+from toss_trading_runtime.tick_collector import _collect_iteration, _finalize_summary
+
+
+def test_focused_and_context_watchlists_are_separated():
+    assert config.FOCUSED_NASDAQ_WATCHLIST == [
+        "MU", "NVDA", "AMD", "AVGO", "MRVL", "ARM",
+        "TSM", "ORCL", "CRWV", "PLTR", "QQQ", "SMH",
+    ]
+    assert config.US_MARKET_CONTEXT_WATCHLIST == ["SPY"]
+    assert config.US_COLLECTION_WATCHLIST == config.FOCUSED_NASDAQ_WATCHLIST + ["SPY"]
+    assert "SPY" not in config.FOCUSED_NASDAQ_WATCHLIST
 
 
 class FakeResponse(object):
@@ -194,7 +209,7 @@ def test_gpt_analyzer_sanitizes_prompt_and_returns_analysis():
             self.body = request.data.decode("utf-8")
             return FakeResponse({
                 "model": "gpt-4o-mini-test",
-                "choices": [{"message": {"content": "분석 결과"}}],
+                "choices": [{"message": {"content": "遺꾩꽍 寃곌낵"}}],
                 "usage": {"total_tokens": 10},
             })
 
@@ -205,7 +220,7 @@ def test_gpt_analyzer_sanitizes_prompt_and_returns_analysis():
         "accountSeq": "123456789",
         "access_token": "secret-token",
     })
-    assert result["analysis"] == "분석 결과"
+    assert result["analysis"] == "遺꾩꽍 寃곌낵"
     assert "123456789" not in opener.body
     assert "secret-token" not in opener.body
 
@@ -332,7 +347,7 @@ RISK_LEVEL: MEDIUM
 CONFIDENCE: LOW
 
 GPT_STRUCTURED_JSON:
-{"symbols":[{"symbol":"MU","decision":"RISK","interest_score":37,"risk_level":"HIGH","confidence":"LOW","relationship_regime":"insufficient_evidence","data_freshness":"stale","summary":"공유허브 relationship stale로 보수 판단","risk_flags":["stale relationship"],"next_checks":["fresh shared hub"]}],"shared_context_freshness":{"latest_kiwoom_context_time":"2026-06-30T09:00:00+09:00","latest_toss_context_time":"2026-06-30T05:00:00+09:00","latest_relationship_context_time":"2026-06-29T05:00:00+09:00","stale_sections":["relationship"],"missing_sections":[]}}
+{"symbols":[{"symbol":"MU","decision":"RISK","interest_score":37,"risk_level":"HIGH","confidence":"LOW","relationship_regime":"insufficient_evidence","data_freshness":"stale","summary":"怨듭쑀?덈툕 relationship stale濡?蹂댁닔 ?먮떒","risk_flags":["stale relationship"],"next_checks":["fresh shared hub"]}],"shared_context_freshness":{"latest_kiwoom_context_time":"2026-06-30T09:00:00+09:00","latest_toss_context_time":"2026-06-30T05:00:00+09:00","latest_relationship_context_time":"2026-06-29T05:00:00+09:00","stale_sections":["relationship"],"missing_sections":[]}}
 """
     structured = extract_structured_analysis(text, ["MU"])
     assert structured[0]["symbol"] == "MU"
@@ -340,7 +355,7 @@ GPT_STRUCTURED_JSON:
     assert structured[0]["interest_score"] == 37
     assert structured[0]["risk_level"] == "HIGH"
     assert structured[0]["confidence"] == "LOW"
-    assert "공유허브" in structured[0]["summary"]
+    assert "怨듭쑀?덈툕" in structured[0]["summary"]
 
 
 def test_structured_analysis_extracts_json_only_mock_gpt_result():
@@ -373,7 +388,7 @@ def test_market_session_helpers_detect_us_premarket_and_kr_nxt():
         "preMarket": {"startTime": "2026-06-16T08:00:00+09:00", "endTime": "2026-06-16T08:50:00+09:00"},
         "regularMarket": {"startTime": "2026-06-16T09:00:00+09:00", "endTime": "2026-06-16T15:30:00+09:00"},
     }}}}
-    from datetime import datetime, timezone
+    from datetime import datetime
     now = datetime.fromisoformat("2026-06-16T18:00:00+09:00")
     assert current_us_session(us, now=now)["session"] == "preMarket"
     now_kr = datetime.fromisoformat("2026-06-16T08:30:00+09:00")
@@ -545,6 +560,34 @@ def test_events_and_store_persist_focused_evidence():
         assert latest["AAPL"]["final_decision"] == "WATCH"
         summary = store.operational_summary()
         assert summary["tables"]["price_snapshots"] == 1
+        assert summary["top_events_scope"] == {
+            "basis": "recent_rows",
+            "row_limit": 50000,
+        }
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+def test_recent_top_events_uses_bounded_latest_rows():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        for index, event_type in enumerate(("OLD", "RECENT_A", "RECENT_B")):
+            store.save_event({
+                "detected_at": "2026-06-16 22:31:0{}.000000".format(index),
+                "symbol": "AAPL",
+                "event_type": event_type,
+                "severity": "info",
+                "message": event_type,
+                "value": index,
+            })
+
+        rows = store._recent_top_events(row_limit=2, result_limit=10)
+
+        assert {row["event_type"] for row in rows} == {"RECENT_A", "RECENT_B"}
+        assert sum(row["count"] for row in rows) == 2
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -711,6 +754,52 @@ def test_tick_collector_iteration_uses_read_only_tick_endpoints():
         os.unlink(tmp.name)
 
 
+def test_sensitive_payload_values_are_fully_redacted():
+    payload = {
+        "headers": {"Authorization": "Bearer secret-token-8zGQ"},
+        "accountSeq": "123456789",
+        "nested": [{"client_secret": "client-secret-UfgQ"}],
+    }
+    sanitized = sanitize_payload(payload)
+    serialized = json.dumps(sanitized, sort_keys=True)
+    assert "secret-token-8zGQ" not in serialized
+    assert "8zGQ" not in serialized
+    assert "123456789" not in serialized
+    assert "client-secret-UfgQ" not in serialized
+    assert sanitized["headers"]["Authorization"] == "*" * len("Bearer secret-token-8zGQ")
+
+
+def test_tick_collector_finalize_marks_running_summary_stopped():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    try:
+        with open(tmp.name, "w", encoding="utf-8") as handle:
+            json.dump({"status": "running", "rows": [{"iteration": 1}]}, handle)
+        summary = _finalize_summary(tmp.name, stop_reason="post_close_finalize")
+        assert summary["status"] == "stopped"
+        assert summary["stop_reason"] == "post_close_finalize"
+        assert summary["finished_at"]
+        with open(tmp.name, "r", encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        assert persisted["status"] == "stopped"
+        assert persisted["rows"] == [{"iteration": 1}]
+    finally:
+        os.unlink(tmp.name)
+
+def test_post_close_finalize_runs_modules_from_package_parent_and_scopes_processes():
+    script_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "post_close_finalize.ps1",
+    )
+    with open(script_path, "r", encoding="utf-8-sig") as handle:
+        script = handle.read()
+
+    assert "Set-Location -LiteralPath $Root" in script
+    assert r"toss_trading_runtime\.(market_session_run|tick_collector|periodic_gpt_loop|dashboard_window)" in script
+    assert '$_.Name -like "python*.exe"' in script
+    assert "& $Python -m toss_trading_runtime.tick_collector --finalize-summary-only" in script
+
+
 def test_feedback_adjustments_attach_to_evidence():
     feedback = [
         {"symbol": "AAPL", "horizon_min": 5, "count": 3, "win_rate": 0.67, "avg_return_pct": 0.2, "best_path_return_pct": 0.4, "worst_path_return_pct": -0.1},
@@ -725,6 +814,152 @@ def test_feedback_adjustments_attach_to_evidence():
     assert evidence["symbol_evidence"]["AAPL"]["feedback_adjustment"]["samples"] == 3
     assert evidence["symbol_evidence"]["NVDA"]["feedback_adjustment"]["samples"] == 0
 
+
+def test_decision_calibration_lowers_score_on_weak_numeric_feedback():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "WATCH",
+        "interest_score": 72,
+        "risk_level": "LOW",
+        "confidence": "HIGH",
+        "summary": "GPT liked momentum.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "partial", "stale_sections": ["relationship"], "missing_sections": []},
+        "market_relationship": {
+            "relationship_regime": "insufficient_evidence",
+            "data_quality": {"warning": "not enough paired observations"},
+        },
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {
+                    "samples": 6,
+                    "avg_return_pct": -0.22,
+                    "win_rate": 0.33,
+                    "worst_path_return_pct": -0.85,
+                    "score_adjustment": -8,
+                },
+                "quant_feedback_guidance": {"label": "negative_expectancy", "sample_count": 6},
+                "quant_feedback": {
+                    "evaluated_count": 6,
+                    "expectancy_pct": -0.2,
+                    "adverse_path_rate_pct": 66.7,
+                },
+                "minute_candles_summary": {
+                    "change_pct": -1.4,
+                    "volume_ratio": 1.8,
+                    "rsi14": 31,
+                    "vwap_distance_pct": -0.7,
+                },
+                "daily_candles_summary": {
+                    "change_pct": -2.3,
+                    "ma5_vs_ma20_pct": -1.2,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["interest_score"] < 40
+    assert calibrated["final_decision"] == "RISK"
+    assert calibrated["risk_level"] == "HIGH"
+    assert calibrated["confidence"] in ("LOW", "MEDIUM")
+    assert calibrated["calibration"]["score_delta"] < 0
+    assert "RISK" in calibrated["summary"]
+    assert "사후 피드백" in calibrated["summary"]
+    assert "다음 확인" in calibrated["summary"]
+    assert "\n- 판단:" in calibrated["summary"]
+    assert "\n- 수치:" in calibrated["summary"]
+
+
+def test_decision_calibration_can_raise_score_on_confirmed_positive_numbers():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "OBSERVE",
+        "interest_score": 62,
+        "risk_level": "MEDIUM",
+        "confidence": "MEDIUM",
+        "summary": "GPT was cautious.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "ok", "stale_sections": [], "missing_sections": []},
+        "market_relationship": {"relationship_regime": "strong", "data_quality": {}},
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {
+                    "samples": 8,
+                    "avg_return_pct": 0.24,
+                    "win_rate": 0.63,
+                    "worst_path_return_pct": -0.15,
+                    "score_adjustment": 8,
+                },
+                "quant_feedback_guidance": {"label": "positive_expectancy", "sample_count": 8},
+                "quant_feedback": {
+                    "evaluated_count": 8,
+                    "expectancy_pct": 0.19,
+                    "adverse_path_rate_pct": 12.5,
+                },
+                "minute_candles_summary": {
+                    "change_pct": 1.3,
+                    "volume_ratio": 2.1,
+                    "rsi14": 61,
+                    "vwap_distance_pct": 0.3,
+                },
+                "daily_candles_summary": {
+                    "change_pct": 2.4,
+                    "ma5_vs_ma20_pct": 0.8,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["interest_score"] >= 70
+    assert calibrated["final_decision"] == "WATCH"
+    assert calibrated["calibration"]["score_delta"] > 0
+
+
+
+def test_decision_calibration_softens_gpt_avoid_without_severe_numeric_risk():
+    structured = [{
+        "symbol": "NVDA",
+        "final_decision": "AVOID",
+        "interest_score": 20,
+        "risk_level": "HIGH",
+        "confidence": "LOW",
+        "summary": "GPT overgeneralized a cautious market.",
+    }]
+    evidence = {
+        "shared_context_status": {"status": "partial", "stale_sections": ["relationship"], "missing_sections": []},
+        "market_relationship": {"relationship_regime": "insufficient_evidence", "data_quality": {"warning": "weak relationship"}},
+        "symbol_evidence": {
+            "NVDA": {
+                "feedback_adjustment": {"samples": 0, "score_adjustment": 0},
+                "quant_feedback_guidance": {"label": "sample_too_small", "sample_count": 0},
+                "quant_feedback": {"evaluated_count": 0},
+                "minute_candles_summary": {
+                    "change_pct": 1.6,
+                    "volume_ratio": 0.6,
+                    "rsi14": 58,
+                    "vwap_distance_pct": 0.2,
+                },
+                "daily_candles_summary": {
+                    "change_pct": -1.2,
+                    "ma5_vs_ma20_pct": -0.2,
+                },
+            },
+        },
+    }
+
+    calibrated = calibrate_structured_analysis(structured, evidence)[0]
+
+    assert calibrated["final_decision"] == "RISK"
+    assert calibrated["interest_score"] >= 40
+    assert any("AVOID softened" in item for item in calibrated["calibration"]["reasons"])
+    assert "AVOID" in calibrated["summary"]
+    assert "RISK" in calibrated["summary"]
 
 def test_previous_analysis_context_and_comparison():
     latest = {
@@ -823,6 +1058,7 @@ def test_runtime_health_and_supervisor_summary_payload():
 def test_market_session_stage_records_success_and_failure():
     class Args(object):
         symbols = "AAPL,QQQ"
+        context_symbols = "SPY,AAPL"
         collect_minutes = 1
         until_kst = None
         interval_sec = 30
@@ -844,6 +1080,8 @@ def test_market_session_stage_records_success_and_failure():
         with open(tmp.name, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         assert payload["symbols"] == ["AAPL", "QQQ"]
+        assert payload["context_symbols"] == ["SPY", "AAPL"]
+        assert payload["collection_symbols"] == ["AAPL", "QQQ", "SPY"]
     finally:
         os.unlink(tmp.name)
 
@@ -986,6 +1224,82 @@ def test_dashboard_snapshot_and_html_render():
         store.close()
         os.unlink(tmp.name)
 
+
+def test_relationship_dates_normalize_offsets_to_naive_utc():
+    assert _parse_date("2026-06-16T00:00:00Z") == datetime(2026, 6, 16, 0, 0)
+    assert _parse_date("2026-06-16T09:00:00+09:00") == datetime(2026, 6, 16, 0, 0)
+
+def test_relationship_pair_cache_reuses_and_invalidates_compact_rows():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    relationship_module._RELATIONSHIP_PAIR_CACHE.clear()
+    try:
+        store.save_relationship_observations([
+            {
+                "observed_at": "2026-06-01 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "NVDA",
+                "source_return_pct": 0.1,
+                "target_return_pct": 0.2,
+                "lag_label": "same_date_us_kr",
+            },
+            {
+                "observed_at": "2026-06-02 15:40:00",
+                "source_symbol": "005930",
+                "target_symbol": "NVDA",
+                "source_return_pct": 0.2,
+                "target_return_pct": 0.4,
+                "lag_label": "same_date_us_kr",
+            },
+        ])
+        calls = []
+        original = store.relationship_observations
+
+        def counted_observations(*args, **kwargs):
+            calls.append(kwargs)
+            return original(*args, **kwargs)
+
+        store.relationship_observations = counted_observations
+        first = build_relationship_evidence(
+            store,
+            domestic_codes=["005930"],
+            us_symbols=["NVDA"],
+            min_samples=2,
+            kiwoom_db_path="missing.db",
+        )
+        second = build_relationship_evidence(
+            store,
+            domestic_codes=["005930"],
+            us_symbols=["NVDA"],
+            min_samples=2,
+            kiwoom_db_path="missing.db",
+        )
+        assert len(calls) == 1
+        assert calls[0]["compact"] is True
+        assert first["pairs"] == second["pairs"]
+
+        store.save_relationship_observations([{
+            "observed_at": "2026-06-03 15:40:00",
+            "source_symbol": "005930",
+            "target_symbol": "NVDA",
+            "source_return_pct": 0.3,
+            "target_return_pct": 0.6,
+            "lag_label": "same_date_us_kr",
+        }])
+        refreshed = build_relationship_evidence(
+            store,
+            domestic_codes=["005930"],
+            us_symbols=["NVDA"],
+            min_samples=2,
+            kiwoom_db_path="missing.db",
+        )
+        assert len(calls) == 2
+        assert refreshed["data_quality"]["paired_observation_count"] == 3
+    finally:
+        relationship_module._RELATIONSHIP_PAIR_CACHE.clear()
+        store.close()
+        os.unlink(tmp.name)
 
 def test_relationship_evidence_blocks_correlation_claim_without_pairs():
     tmp = tempfile.NamedTemporaryFile(delete=False)
@@ -1420,7 +1734,7 @@ def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
                 self.body = request.data.decode("utf-8")
                 return FakeResponse({
                     "model": "gpt-4o-mini-test",
-                    "choices": [{"message": {"content": "SYMBOL: 005930\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\n국내장 분석"}}],
+                    "choices": [{"message": {"content": "SYMBOL: 005930\nDECISION: WATCH\nINTEREST_SCORE: 55\nRISK_LEVEL: MEDIUM\nCONFIDENCE: LOW\n援?궡??遺꾩꽍"}}],
                     "usage": {"total_tokens": 20},
                 })
 
@@ -1428,6 +1742,134 @@ def test_domestic_evidence_and_gpt_payload_use_imported_feedback():
         gpt = TossGptAnalyzer(api_key="sk-test", opener=opener).analyze_domestic_evidence(evidence, ["005930"])
         assert "domestic Korean-market" in opener.body
         assert "005930" in gpt["analysis"]
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+
+
+def test_quant_feedback_builds_cost_aware_symbol_guidance():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        analysis_id = store.save_analysis_result(
+            {"symbols": ["NVDA"], "collected_at": "2026-07-01 22:31:00.000000"},
+            {"model": "test", "analysis": "SYMBOL: NVDA"},
+        )
+        store.save_structured_analysis(analysis_id, [{
+            "symbol": "NVDA",
+            "final_decision": "WATCH",
+            "interest_score": 68,
+            "risk_level": "MEDIUM",
+            "confidence": "MEDIUM",
+            "summary": "test",
+        }])
+        rows = [
+            ("2026-07-01 22:31:00.000000", 100.0, 5, 0.40, 0.60, -0.10, "win"),
+            ("2026-07-01 22:32:00.000000", 100.0, 5, 0.20, 0.35, -0.20, "win"),
+            ("2026-07-01 22:45:00.000000", 100.0, 5, -0.10, 0.20, -0.50, "loss"),
+            ("2026-07-01 23:00:00.000000", 100.0, 5, 0.50, 0.80, -0.10, "win"),
+            ("2026-07-01 23:20:00.000000", 100.0, 5, 0.30, 0.45, -0.10, "win"),
+        ]
+        for created_at, anchor, horizon, ret, max_ret, min_ret, outcome in rows:
+            store.conn.execute("""
+                INSERT INTO paper_trade_candidates (
+                    created_at, analysis_id, symbol, anchor_price, horizon_min,
+                    due_at, status, result_return_pct, max_return_pct,
+                    min_return_pct, outcome, evaluated_at, payload_json
+                ) VALUES (?, ?, 'NVDA', ?, ?, ?, 'evaluated', ?, ?, ?, ?, ?, '{}')
+            """, (
+                created_at,
+                analysis_id,
+                anchor,
+                horizon,
+                created_at,
+                ret,
+                max_ret,
+                min_ret,
+                outcome,
+                "2026-07-01 23:30:00.000000",
+            ))
+        store.conn.commit()
+
+        snapshot = build_quant_feedback_snapshot(
+            store.conn,
+            symbols=["NVDA"],
+            days=30,
+            min_sample=5,
+            as_of="2026-07-01 23:30:00.000000",
+        )
+        assert snapshot["schema"] == "toss_quant_feedback_v1"
+        assert snapshot["overview"]["evaluated_count"] == 5
+        assert snapshot["overview"]["cluster_count"] == 4
+        assert snapshot["by_symbol"][0]["symbol"] == "NVDA"
+        assert snapshot["symbol_guidance"]["NVDA"]["label"] == "negative_expectancy"
+
+        evidence = {"symbol_evidence": {"NVDA": {"symbol": "NVDA"}}}
+        attach_quant_feedback_to_evidence(evidence, snapshot)
+        assert evidence["symbol_evidence"]["NVDA"]["quant_feedback"]["evaluated_count"] == 5
+        compact = compact_quant_feedback(snapshot, symbols=["NVDA"])
+        assert compact["by_symbol"][0]["symbol"] == "NVDA"
+    finally:
+        store.close()
+        os.unlink(tmp.name)
+
+def test_quant_feedback_uses_direction_and_relationship_regime():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+    store = TossRuntimeStore(tmp.name)
+    try:
+        analysis_id = store.save_analysis_result(
+            {
+                "symbols": ["NVDA"],
+                "collected_at": "2026-07-01 22:31:00.000000",
+                "market_relationship": {"relationship_regime": "strong"},
+            },
+            {"model": "test", "analysis": "SYMBOL: NVDA"},
+        )
+        store.save_structured_analysis(analysis_id, [{
+            "symbol": "NVDA",
+            "final_decision": "AVOID",
+            "interest_score": 20,
+            "risk_level": "HIGH",
+            "confidence": "HIGH",
+            "summary": "risk test",
+        }])
+        for index, ret in enumerate((-1.0, -0.8, -0.6, -1.2, -0.9)):
+            created_at = "2026-07-01 22:{:02d}:00.000000".format(31 + index * 11)
+            store.conn.execute("""
+                INSERT INTO paper_trade_candidates (
+                    created_at, analysis_id, symbol, anchor_price, horizon_min,
+                    due_at, status, result_return_pct, max_return_pct,
+                    min_return_pct, outcome, evaluated_at, payload_json
+                ) VALUES (?, ?, 'NVDA', 100, 60, ?, 'evaluated', ?, 0.1, ?, 'loss', ?, '{}')
+            """, (
+                created_at,
+                analysis_id,
+                created_at,
+                ret,
+                ret,
+                "2026-07-02 00:30:00.000000",
+            ))
+        store.conn.commit()
+
+        snapshot = build_quant_feedback_snapshot(
+            store.conn,
+            symbols=["NVDA"],
+            days=30,
+            min_sample=5,
+            as_of="2026-07-02 00:30:00.000000",
+        )
+        overview = snapshot["overview"]
+        assert overview["expectancy_pct"] < 0
+        assert overview["directional_evaluated_count"] == 5
+        assert overview["avg_net_directional_return_pct"] > 0
+        assert overview["net_directional_success_pct"] == 100.0
+        assert snapshot["guidance"]["label"] == "positive_expectancy"
+        assert snapshot["guidance"]["metric_basis"] == "net_directional"
+        assert snapshot["by_regime"][0]["regime"] == "strong"
+        assert snapshot["by_regime"][0]["avg_net_directional_return_pct"] > 0
     finally:
         store.close()
         os.unlink(tmp.name)
@@ -1482,6 +1924,7 @@ if __name__ == "__main__":
         test_toss_gpt_prompts_include_shared_freshness_and_json_contract,
         test_structured_analysis_extracts_gpt_structured_json_block,
         test_structured_analysis_extracts_json_only_mock_gpt_result,
+test_focused_and_context_watchlists_are_separated,
         test_market_session_helpers_detect_us_premarket_and_kr_nxt,
         test_us_session_infers_kst_overnight_regular_market,
         test_score_symbol_ranks_momentum_and_volume,
@@ -1494,7 +1937,13 @@ if __name__ == "__main__":
         test_paper_candidate_post_close_can_evaluate_future_due_with_final_price,
         test_trade_ticks_orderbook_analysis_and_collector_persist,
         test_tick_collector_iteration_uses_read_only_tick_endpoints,
+        test_sensitive_payload_values_are_fully_redacted,
+        test_tick_collector_finalize_marks_running_summary_stopped,
+        test_post_close_finalize_runs_modules_from_package_parent_and_scopes_processes,
         test_feedback_adjustments_attach_to_evidence,
+        test_decision_calibration_lowers_score_on_weak_numeric_feedback,
+        test_decision_calibration_can_raise_score_on_confirmed_positive_numbers,
+        test_decision_calibration_softens_gpt_avoid_without_severe_numeric_risk,
         test_previous_analysis_context_and_comparison,
         test_structured_analysis_splits_markdown_symbol_sections,
         test_runtime_health_and_supervisor_summary_payload,
@@ -1510,8 +1959,11 @@ if __name__ == "__main__":
         test_dashboard_window_watchlist_file_persistence,
         test_domestic_import_loads_kiwoom_feedback_summary,
         test_domestic_evidence_and_gpt_payload_use_imported_feedback,
+test_quant_feedback_builds_cost_aware_symbol_guidance,
+        test_quant_feedback_uses_direction_and_relationship_regime,
         test_store_retries_transient_write_lock,
     ]
     for test in tests:
         test()
         print("PASS {}".format(test.__name__))
+

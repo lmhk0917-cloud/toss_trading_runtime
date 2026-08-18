@@ -1,5 +1,6 @@
 param(
-    [string]$Symbols = "MU,NVDA,AMD,AVGO,MRVL,ARM,TSM,ORCL,CRWV,PLTR,QQQ,SMH",
+    [string]$Symbols = "",
+    [string]$ContextSymbols = "",
     [string]$RegularStartKst = "22:31",
     [string]$RegularUntilKst = "05:00",
     [string]$PostCloseKst = "05:08",
@@ -15,6 +16,29 @@ $Pythonw = "C:\Users\lmhk2\anaconda3\pythonw.exe"
 $ReportsDir = Join-Path $RuntimeDir "reports"
 $LogDir = Join-Path $ReportsDir "run_logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Resolve-WatchlistSymbols([string]$Provided, [string]$FileName, [string]$Fallback) {
+    if ($Provided -and $Provided.Trim()) {
+        return $Provided.Trim()
+    }
+    $path = Join-Path (Join-Path $RuntimeDir "watchlists") $FileName
+    try {
+        $payload = Get-Content -Raw -Path $path | ConvertFrom-Json
+        $values = @($payload.symbols | ForEach-Object { "$_".Trim().ToUpperInvariant() } | Where-Object { $_ })
+        if ($values.Count -gt 0) {
+            return ($values -join ",")
+        }
+    } catch {
+    }
+    return $Fallback
+}
+
+$Symbols = Resolve-WatchlistSymbols $Symbols "us_focus.json" "MU,NVDA,AMD,AVGO,MRVL,ARM,TSM,ORCL,CRWV,PLTR,QQQ,SMH"
+$ContextSymbols = Resolve-WatchlistSymbols $ContextSymbols "us_context.json" "SPY"
+$CollectionSymbols = ((($Symbols + "," + $ContextSymbols).Split(",")) |
+    ForEach-Object { $_.Trim().ToUpperInvariant() } |
+    Where-Object { $_ } |
+    Select-Object -Unique) -join ","
 
 function Resolve-TargetTime([string]$hhmm) {
     $parts = $hhmm.Split(":")
@@ -36,6 +60,8 @@ $launchLog = Join-Path $LogDir "us_test_launcher_latest.log"
 @(
     "US_TEST_LAUNCHER_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
     "SYMBOLS=$Symbols",
+    "CONTEXT_SYMBOLS=$ContextSymbols",
+    "COLLECTION_SYMBOLS=$CollectionSymbols",
     "REGULAR_START_KST=$($regularStart.ToString('yyyy-MM-dd HH:mm:ss'))",
     "REGULAR_UNTIL_KST=$RegularUntilKst",
     "POST_CLOSE_KST=$PostCloseKst",
@@ -56,6 +82,7 @@ $postCloseErr = Join-Path $LogDir "post_close_watcher_$stamp.err.log"
 $premarket = Start-Process -FilePath $Python -ArgumentList @(
     "-u", "-m", "toss_trading_runtime.market_session_run",
     "--symbols", $Symbols,
+    "--context-symbols", $ContextSymbols,
     "--until-kst", $RegularStartKst,
     "--interval-sec", "$IntervalSec",
     "--minute-count", "120",
@@ -65,7 +92,7 @@ $premarket = Start-Process -FilePath $Python -ArgumentList @(
 
 $premarketTick = Start-Process -FilePath $Python -ArgumentList @(
     "-u", "-m", "toss_trading_runtime.tick_collector",
-    "--symbols", $Symbols,
+    "--symbols", $CollectionSymbols,
     "--iterations", "$premarketTickIterations",
     "--interval-sec", "$IntervalSec",
     "--trade-count", "50"
@@ -95,6 +122,7 @@ $regularWatcher = Start-Process -FilePath "powershell.exe" -ArgumentList @(
     "-ExecutionPolicy", "Bypass",
     "-File", "`"$RuntimeDir\continue_regular_session.ps1`"",
     "-Symbols", $Symbols,
+    "-ContextSymbols", $ContextSymbols,
     "-StartKst", $RegularStartKst,
     "-UntilKst", $RegularUntilKst,
     "-WaitForPidCsv", $waitCsv,

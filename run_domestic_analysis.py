@@ -9,6 +9,7 @@ from datetime import datetime
 try:
     from . import config
     from .client import TossInvestClient
+    from .decision_calibration import calibrate_structured_analysis
     from .domestic_analysis import collect_domestic_evidence
     from .env_loader import load_local_env
     from .event_detector import detect_events
@@ -19,6 +20,7 @@ try:
 except ImportError:  # pragma: no cover
     import config
     from client import TossInvestClient
+    from decision_calibration import calibrate_structured_analysis
     from domestic_analysis import collect_domestic_evidence
     from env_loader import load_local_env
     from event_detector import detect_events
@@ -78,6 +80,7 @@ def main(argv=None):
     events = detect_events(evidence)
     gpt = analyzer.analyze_domestic_evidence(evidence, symbols=codes)
     structured = extract_structured_analysis(gpt.get("analysis"), codes)
+    structured = calibrate_structured_analysis(structured, evidence)
     store = TossRuntimeStore(db_path=args.db_path) if args.db_path else TossRuntimeStore()
     try:
         analysis_id = store.save_analysis_result(evidence, gpt, events=events, mode="domestic_kr")

@@ -1,4 +1,4 @@
-"""OpenAI GPT analysis wrapper for Toss read-only evidence.
+﻿"""OpenAI GPT analysis wrapper for Toss read-only evidence.
 
 Uses the Chat Completions HTTP endpoint via the standard library so this
 runtime does not depend on the OpenAI SDK version installed for Kiwoom.
@@ -11,8 +11,10 @@ import urllib.request
 
 try:
     from .security import sanitize_payload
+    from .quant_feedback import compact_quant_feedback
 except ImportError:  # pragma: no cover
     from security import sanitize_payload
+    from quant_feedback import compact_quant_feedback
 
 
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
@@ -143,6 +145,7 @@ class TossGptAnalyzer(object):
             "- Use regression.beta, r_squared, hit_ratio_up, hit_ratio_down, and lead_score as sensitivity and directional reliability checks; do not rely on Pearson correlation alone.\n"
             "- If gap_effect.status is not_available, explicitly avoid claims about Korean open-gap or intraday reversal behavior.\n"
             "- If evidence is weak, lower INTEREST_SCORE and state hold/watch conditions.\n"
+            "- Reserve DECISION: AVOID for severe numeric downside only: weak evaluated feedback, large adverse path, or both short-term and daily deterioration. If evidence is mixed or simply uncertain, use RISK or OBSERVE instead of AVOID.\n"
             "- If return feedback is negative or worst_path_return_pct is poor, lower INTEREST_SCORE even if momentum looks good.\n"
             "- If return feedback is positive with enough samples, explain why confidence can improve.\n"
             "- If QQQ, SPY, or SMH are present, use them as context for semiconductor names.\n"
@@ -263,6 +266,7 @@ def _focused_prompt_evidence(evidence, symbols=None):
             for symbol in symbols
         },
         "paper_feedback_summary": _top_feedback_rows(evidence.get("paper_feedback_summary"), symbols),
+        "quant_feedback": compact_quant_feedback(evidence.get("quant_feedback"), symbols),
         "return_feedback_by_symbol": _filter_symbol_map(evidence.get("return_feedback_by_symbol"), symbols),
         "feedback_adjustments": _filter_symbol_map(evidence.get("feedback_adjustments"), symbols),
         "previous_analysis_context": _filter_symbol_map(evidence.get("previous_analysis_context"), symbols),
@@ -314,6 +318,8 @@ def _compact_focused_symbol(item):
         "minute_candles_summary": item.get("minute_candles_summary"),
         "daily_candles_summary": item.get("daily_candles_summary"),
         "feedback_adjustment": item.get("feedback_adjustment"),
+        "quant_feedback": item.get("quant_feedback"),
+        "quant_feedback_guidance": item.get("quant_feedback_guidance"),
         "previous_analysis": item.get("previous_analysis"),
         "errors": item.get("errors") or [],
     }
@@ -433,3 +439,4 @@ def _selected(value, keys):
     if not isinstance(value, dict):
         return value
     return {key: value.get(key) for key in keys if key in value}
+

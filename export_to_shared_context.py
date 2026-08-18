@@ -69,7 +69,7 @@ def export_to_shared_context(db_path=None, shared_db=DEFAULT_SHARED_DB):
             relationship = build_relationship_evidence(
                 toss_store,
                 domestic_codes=["005930", "000660"],
-                us_symbols=config.FOCUSED_NASDAQ_WATCHLIST,
+                us_symbols=config.US_COLLECTION_WATCHLIST,
             )
         finally:
             toss_store.close()
