@@ -1,4 +1,4 @@
-﻿"""OpenAI GPT analysis wrapper for Toss read-only evidence.
+"""OpenAI GPT analysis wrapper for Toss read-only evidence.
 
 Uses the Chat Completions HTTP endpoint via the standard library so this
 runtime does not depend on the OpenAI SDK version installed for Kiwoom.
@@ -249,7 +249,7 @@ def _focused_prompt_evidence(evidence, symbols=None):
         "collected_at": evidence.get("collected_at"),
         "symbols": symbols,
         "evidence_quality_manifest": {
-            "prompt_package": "quality_preserving_compact_v1",
+            "prompt_package": "quality_preserving_compact_v2",
             "raw_evidence_storage": "analysis_results.evidence_json",
             "raw_account_payloads_excluded": True,
             "purpose": "reduce repeated API noise while preserving decision-critical evidence",
@@ -268,8 +268,6 @@ def _focused_prompt_evidence(evidence, symbols=None):
         "paper_feedback_summary": _top_feedback_rows(evidence.get("paper_feedback_summary"), symbols),
         "quant_feedback": compact_quant_feedback(evidence.get("quant_feedback"), symbols),
         "return_feedback_by_symbol": _filter_symbol_map(evidence.get("return_feedback_by_symbol"), symbols),
-        "feedback_adjustments": _filter_symbol_map(evidence.get("feedback_adjustments"), symbols),
-        "previous_analysis_context": _filter_symbol_map(evidence.get("previous_analysis_context"), symbols),
         "market_relationship": _compact_relationship(evidence.get("market_relationship")),
     }
 
@@ -283,7 +281,7 @@ def _domestic_prompt_evidence(evidence, symbols=None):
         "collected_at": evidence.get("collected_at"),
         "symbols": symbols,
         "evidence_quality_manifest": {
-            "prompt_package": "quality_preserving_compact_v1",
+            "prompt_package": "quality_preserving_compact_v2",
             "raw_evidence_storage": "analysis_results.evidence_json",
             "raw_account_payloads_excluded": True,
             "purpose": "preserve imported feedback and live Toss summaries without repeated raw payload noise",
@@ -318,8 +316,6 @@ def _compact_focused_symbol(item):
         "minute_candles_summary": item.get("minute_candles_summary"),
         "daily_candles_summary": item.get("daily_candles_summary"),
         "feedback_adjustment": item.get("feedback_adjustment"),
-        "quant_feedback": item.get("quant_feedback"),
-        "quant_feedback_guidance": item.get("quant_feedback_guidance"),
         "previous_analysis": item.get("previous_analysis"),
         "errors": item.get("errors") or [],
     }
@@ -390,17 +386,17 @@ def _compact_relationship(relationship):
             "source_symbol": pair.get("source_symbol"),
             "target_symbol": pair.get("target_symbol"),
             "analysis_direction": pair.get("analysis_direction"),
-            "resolution": pair.get("resolution"),
+            "resolution": _selected(pair.get("resolution"), ["timeframe", "granularity", "daily_historical_count", "intraday_count", "intraday_source", "warning"]),
             "lag_label": pair.get("lag_label"),
             "paired_sample_count": pair.get("paired_sample_count"),
             "correlation": pair.get("correlation"),
-            "regression": pair.get("regression"),
-            "directional_stats": pair.get("directional_stats"),
+            "regression": _selected(pair.get("regression"), ["model", "alpha", "beta", "r_squared"]),
+            "directional_stats": _selected(pair.get("directional_stats"), ["hit_ratio_up", "hit_ratio_down", "upside_corr", "downside_corr"]),
             "lead_score": pair.get("lead_score"),
             "relationship_regime": pair.get("relationship_regime"),
             "latest_observed_at": pair.get("latest_observed_at"),
-            "rolling_correlation": pair.get("rolling_correlation"),
-            "gap_effect": pair.get("gap_effect"),
+            "rolling_correlation": _selected(pair.get("rolling_correlation"), ["latest_observed_date", "stability", "warning"]),
+            "gap_effect": _selected(pair.get("gap_effect"), ["status", "matched_count", "gap_open_corr", "close_follow_corr", "intraday_reversal_corr", "reversal_rate", "source"]),
         })
     return {
         "mode": relationship.get("mode"),
@@ -411,7 +407,7 @@ def _compact_relationship(relationship):
         "relationship_regime": relationship.get("relationship_regime"),
         "pairs": pairs,
         "proxy_alignment": relationship.get("proxy_alignment"),
-        "kiwoom_market_context": relationship.get("kiwoom_market_context"),
+        "kiwoom_market_context": _selected(relationship.get("kiwoom_market_context"), ["status", "generated_at", "source_preference", "data_quality"]),
         "interpretation_rules": relationship.get("interpretation_rules"),
     }
 

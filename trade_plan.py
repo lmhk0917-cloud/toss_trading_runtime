@@ -149,11 +149,14 @@ def build_trade_plan(analysis, evidence):
             "net_reward_risk_1": levels["net_reward_risk_1"],
             "net_reward_risk_2": levels["net_reward_risk_2"],
             "adaptive_guard": adaptive_guard,
+            "evidence_reflection_enabled": adaptive_guard.get("evidence_reflection_enabled", True),
+            "paper_validation_enabled": adaptive_guard.get("paper_validation_enabled", True),
         },
         "safety": {
             "order_mode": getattr(config, "ORDER_MODE", "disabled"),
             "allow_real_order": bool(getattr(config, "ALLOW_REAL_ORDER", False)),
             "orders_called": False,
+            "live_trade_blocked": adaptive_guard.get("live_trade_blocked", True),
         },
     }
 

@@ -64,20 +64,32 @@ class TossDashboardWindow(object):
         self.refresh()
 
     def _build_ui(self):
-        self.root.configure(bg="#f6f7f9")
+        self.root.configure(bg="#0f172a")
+        self.root.option_add("*Text.background", "#111827")
+        self.root.option_add("*Text.foreground", "#e5e7eb")
+        self.root.option_add("*Text.insertBackground", "#e5e7eb")
+        self.root.option_add("*Text.selectBackground", "#1d4ed8")
+        self.root.option_add("*Text.selectForeground", "#ffffff")
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Treeview", rowheight=28, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-        style.configure("TButton", font=("Segoe UI", 10))
-        style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"), background="#ffffff", foreground="#1d2430")
-        style.configure("Meta.TLabel", font=("Segoe UI", 9), background="#ffffff", foreground="#667085")
-        style.configure("Metric.TFrame", background="#ffffff", relief="solid", borderwidth=1)
-        style.configure("MetricLabel.TLabel", font=("Segoe UI", 9), background="#ffffff", foreground="#667085")
-        style.configure("MetricValue.TLabel", font=("Segoe UI", 14, "bold"), background="#ffffff", foreground="#1d2430")
+        style.configure("Treeview", rowheight=28, font=("Segoe UI", 10), background="#111827", fieldbackground="#111827", foreground="#e5e7eb", bordercolor="#334155")
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background="#182235", foreground="#e5e7eb", bordercolor="#334155")
+        style.configure("TButton", font=("Segoe UI", 10), background="#1f2937", foreground="#e5e7eb", bordercolor="#334155")
+        style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"), background="#111827", foreground="#e5e7eb")
+        style.configure("Meta.TLabel", font=("Segoe UI", 9), background="#111827", foreground="#94a3b8")
+        style.configure("Metric.TFrame", background="#111827", relief="solid", borderwidth=1)
+        style.configure("MetricLabel.TLabel", font=("Segoe UI", 9), background="#111827", foreground="#94a3b8")
+        style.configure("MetricValue.TLabel", font=("Segoe UI", 14, "bold"), background="#111827", foreground="#e5e7eb")
+        style.configure("TFrame", background="#0f172a")
+        style.configure("TLabel", background="#0f172a", foreground="#e5e7eb")
+        style.configure("TEntry", fieldbackground="#111827", foreground="#e5e7eb", bordercolor="#334155")
+        style.configure("TNotebook", background="#0f172a", borderwidth=0)
+        style.configure("TNotebook.Tab", background="#1f2937", foreground="#cbd5e1", padding=(10, 5))
+        style.map("TNotebook.Tab", background=[("selected", "#111827")], foreground=[("selected", "#f8fafc")])
+        style.map("Treeview", background=[("selected", "#1d4ed8")], foreground=[("selected", "#ffffff")])
 
         header = ttk.Frame(self.root, padding=(16, 12))
         header.pack(fill="x")
@@ -229,10 +241,10 @@ class TossDashboardWindow(object):
         self.detail_text.pack(fill="both", expand=True)
         self.detail_text.configure(state="disabled")
 
-        self.score_canvas = tk.Canvas(score_frame, height=180, bg="#ffffff", highlightthickness=1, highlightbackground="#d9dee7")
+        self.score_canvas = tk.Canvas(score_frame, height=180, bg="#111827", highlightthickness=1, highlightbackground="#334155")
         self.score_canvas.pack(fill="both", expand=True)
 
-        self.chart_canvas = tk.Canvas(chart_frame, height=260, bg="#ffffff", highlightthickness=1, highlightbackground="#d9dee7")
+        self.chart_canvas = tk.Canvas(chart_frame, height=260, bg="#111827", highlightthickness=1, highlightbackground="#334155")
         self.chart_canvas.pack(fill="both", expand=True)
 
         paper_columns = ("created", "symbol", "horizon", "anchor", "status", "return", "max", "min", "outcome")
@@ -1149,13 +1161,13 @@ class TossDashboardWindow(object):
         width = max(canvas.winfo_width(), 400)
         height = max(canvas.winfo_height(), 180)
         pad = 34
-        canvas.create_text(12, 12, anchor="nw", text="Interest score history: {}".format(symbol or "-"), fill="#1d2430", font=("Segoe UI", 10, "bold"))
-        canvas.create_line(pad, height - pad, width - pad, height - pad, fill="#d9dee7")
-        canvas.create_line(pad, pad, pad, height - pad, fill="#d9dee7")
+        canvas.create_text(12, 12, anchor="nw", text="Interest score history: {}".format(symbol or "-"), fill="#e5e7eb", font=("Segoe UI", 10, "bold"))
+        canvas.create_line(pad, height - pad, width - pad, height - pad, fill="#334155")
+        canvas.create_line(pad, pad, pad, height - pad, fill="#334155")
         for score in (0, 50, 100):
             y = height - pad - (score / 100.0) * (height - 2 * pad)
-            canvas.create_line(pad, y, width - pad, y, fill="#eef2f6")
-            canvas.create_text(8, y, anchor="w", text=str(score), fill="#667085", font=("Segoe UI", 8))
+            canvas.create_line(pad, y, width - pad, y, fill="#1f2937")
+            canvas.create_text(8, y, anchor="w", text=str(score), fill="#94a3b8", font=("Segoe UI", 8))
         if not symbol:
             return
         history = ((self.snapshot.get("score_history") or {}).get(symbol) or [])
@@ -1171,10 +1183,10 @@ class TossDashboardWindow(object):
             coords = []
             for x, y, _item in points:
                 coords.extend([x, y])
-            canvas.create_line(*coords, fill="#1b64d8", width=2)
+            canvas.create_line(*coords, fill="#60a5fa", width=2)
         for x, y, item in points:
-            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#1b64d8", outline="#1b64d8")
-            canvas.create_text(x, y - 12, text=str(item.get("interest_score")), fill="#1d2430", font=("Segoe UI", 8))
+            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#60a5fa", outline="#60a5fa")
+            canvas.create_text(x, y - 12, text=str(item.get("interest_score")), fill="#e5e7eb", font=("Segoe UI", 8))
 
     def _draw_minute_chart(self, row):
         canvas = self.chart_canvas
@@ -1187,13 +1199,13 @@ class TossDashboardWindow(object):
         pad_b = 34
         symbol = (row or {}).get("symbol") or "-"
         series = (row or {}).get("minute_series") or []
-        canvas.create_text(12, 10, anchor="nw", text="1m close chart: {}".format(symbol), fill="#1d2430", font=("Segoe UI", 10, "bold"))
+        canvas.create_text(12, 10, anchor="nw", text="1m close chart: {}".format(symbol), fill="#e5e7eb", font=("Segoe UI", 10, "bold"))
         if len(series) < 2:
-            canvas.create_text(width / 2, height / 2, text="Not enough 1m close data", fill="#667085", font=("Segoe UI", 11))
+            canvas.create_text(width / 2, height / 2, text="Not enough 1m close data", fill="#94a3b8", font=("Segoe UI", 11))
             return
         values = [_to_float(item.get("latest_close")) for item in series if _to_float(item.get("latest_close")) > 0]
         if len(values) < 2:
-            canvas.create_text(width / 2, height / 2, text="No valid close values", fill="#667085", font=("Segoe UI", 11))
+            canvas.create_text(width / 2, height / 2, text="No valid close values", fill="#94a3b8", font=("Segoe UI", 11))
             return
         low = min(values)
         high = max(values)
@@ -1210,12 +1222,12 @@ class TossDashboardWindow(object):
         def x_for(index):
             return x0 + (index / float(len(values) - 1)) * (x1 - x0)
 
-        canvas.create_rectangle(x0, y0, x1, y1, outline="#d9dee7")
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#334155")
         levels = [
             ("R", high, "#b42318"),
             ("Fib 23.6", high - (high - low) * 0.236, "#b54708"),
             ("Fib 38.2", high - (high - low) * 0.382, "#b54708"),
-            ("Fib 50.0", high - (high - low) * 0.500, "#667085"),
+            ("Fib 50.0", high - (high - low) * 0.500, "#94a3b8"),
             ("Fib 61.8", high - (high - low) * 0.618, "#b54708"),
             ("S", low, "#147a42"),
         ]
@@ -1227,11 +1239,11 @@ class TossDashboardWindow(object):
         coords = []
         for idx, price in enumerate(values):
             coords.extend([x_for(idx), y_for(price)])
-        canvas.create_line(*coords, fill="#1b64d8", width=2)
+        canvas.create_line(*coords, fill="#60a5fa", width=2)
         last_x = x_for(len(values) - 1)
         last_y = y_for(values[-1])
-        canvas.create_oval(last_x - 4, last_y - 4, last_x + 4, last_y + 4, fill="#1b64d8", outline="#1b64d8")
-        canvas.create_text(last_x - 4, last_y - 14, anchor="e", text="{:.2f}".format(values[-1]), fill="#1d2430", font=("Segoe UI", 9, "bold"))
+        canvas.create_oval(last_x - 4, last_y - 4, last_x + 4, last_y + 4, fill="#60a5fa", outline="#60a5fa")
+        canvas.create_text(last_x - 4, last_y - 14, anchor="e", text="{:.2f}".format(values[-1]), fill="#e5e7eb", font=("Segoe UI", 9, "bold"))
 
     def _set_text(self, widget, text):
         widget.configure(state="normal")

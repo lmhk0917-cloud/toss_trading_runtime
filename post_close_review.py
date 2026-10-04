@@ -64,7 +64,7 @@ def build_review(db_path, reports_dir, symbols):
             "analysis_results",
             "paper_trade_candidates",
         ]
-        counts = {table: _scalar(con, "SELECT COUNT(1) FROM " + table) for table in tables}
+        counts = {table: _table_high_watermark(con, table) for table in tables}
         latest_prices = {}
         latest_ticks = {}
         for symbol in symbols:
@@ -112,7 +112,12 @@ def build_review(db_path, reports_dir, symbols):
             dict(row) for row in con.execute(
                 """
                 SELECT event_type, severity, COUNT(1) AS count
-                FROM event_logs
+                FROM (
+                    SELECT event_type, severity
+                    FROM event_logs
+                    ORDER BY id DESC
+                    LIMIT 50000
+                )
                 GROUP BY event_type, severity
                 ORDER BY count DESC
                 LIMIT 12
@@ -148,6 +153,7 @@ def build_review(db_path, reports_dir, symbols):
     lines.append("")
     lines.append("## DB Counts")
     lines.append("")
+    lines.append("- count_basis: MAX(id) high-water mark for append-only operational tables")
     for key in tables:
         lines.append("- {}: {}".format(key, counts.get(key)))
     lines.append("")
@@ -184,7 +190,9 @@ def build_review(db_path, reports_dir, symbols):
     lines.append("- net_win_rate_pct: {}".format(q_overview.get("net_win_rate_pct")))
     lines.append("- net_profit_factor: {}".format(q_overview.get("net_profit_factor")))
     lines.append("- directional_evaluated_count: {}".format(q_overview.get("directional_evaluated_count")))
+    lines.append("- independent_directional_count: {}".format(q_overview.get("cluster_directional_evaluated_count")))
     lines.append("- avg_net_directional_return_pct: {}".format(q_overview.get("avg_net_directional_return_pct")))
+    lines.append("- avg_independent_net_directional_return_pct: {}".format(q_overview.get("avg_cluster_net_directional_return_pct")))
     lines.append("- net_directional_success_pct: {}".format(q_overview.get("net_directional_success_pct")))
     lines.append("- net_directional_profit_factor: {}".format(q_overview.get("net_directional_profit_factor")))
     lines.append("")
@@ -198,6 +206,25 @@ def build_review(db_path, reports_dir, symbols):
             net_profit_factor=row.get("net_profit_factor"),
             label=guidance.get("label", "none"),
         ))
+    lines.append("")
+    lines.append("## Cost Sensitivity")
+    lines.append("")
+    for row in quant_feedback.get("cost_sensitivity") or []:
+        lines.append(
+            "- cost={round_trip_cost_pct}% independent_samples={independent_sample_count} "
+            "net_directional={avg_net_directional_return_pct}% "
+            "win={net_directional_success_pct}% pf={net_directional_profit_factor}".format(**row)
+        )
+    lines.append("")
+    lines.append("## Parallel Strategy Comparison")
+    lines.append("")
+    for row in quant_feedback.get("parallel_strategy_comparison") or []:
+        lines.append(
+            "- {label}: status={status} samples={independent_sample_count} "
+            "horizon={horizon_min}m min_score={min_interest_score} "
+            "avg_net={avg_net_return_pct}% win={net_win_rate_pct}% "
+            "pf={net_profit_factor} live_trade_enabled={live_trade_enabled}".format(**row)
+        )
     lines.append("")
     lines.append("## Regime Profitability")
     lines.append("")
@@ -320,13 +347,21 @@ def _inspect_kiwoom_db(path):
         try:
             tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
             if "ticks" in tables:
-                item["latest_tick"] = _row_dict(con.execute(
-                    "SELECT code, MAX(received_at) AS latest_received_at, COUNT(1) AS row_count FROM ticks"
-                ).fetchone())
+                tick_columns = [row[1] for row in con.execute("PRAGMA table_info(ticks)").fetchall()]
+                if "id" in tick_columns:
+                    latest = _row_dict(con.execute(
+                        "SELECT id, code, received_at AS latest_received_at FROM ticks ORDER BY id DESC LIMIT 1"
+                    ).fetchone()) or {}
+                    latest["row_count_high_watermark"] = latest.pop("id", None)
+                    item["latest_tick"] = latest
+                else:
+                    item["latest_tick"] = _row_dict(con.execute(
+                        "SELECT code, received_at AS latest_received_at FROM ticks ORDER BY received_at DESC LIMIT 1"
+                    ).fetchone())
             if "paper_trade_results" in tables:
-                item["paper_trade_results"] = _scalar(con, "SELECT COUNT(1) FROM paper_trade_results")
+                item["paper_trade_results"] = _table_high_watermark(con, "paper_trade_results")
             if "signal_logs" in tables:
-                item["signal_logs"] = _scalar(con, "SELECT COUNT(1) FROM signal_logs")
+                item["signal_logs"] = _table_high_watermark(con, "signal_logs")
         finally:
             con.close()
     except Exception as exc:
@@ -348,6 +383,12 @@ def _load_json(reports_dir, name):
 def _row_dict(row):
     return dict(row) if row else None
 
+
+def _table_high_watermark(con, table):
+    columns = [row[1] for row in con.execute("PRAGMA table_info({})".format(table)).fetchall()]
+    if "id" in columns:
+        return _scalar(con, "SELECT MAX(id) FROM " + table) or 0
+    return _scalar(con, "SELECT COUNT(1) FROM " + table) or 0
 
 def _scalar(con, query, params=()):
     row = con.execute(query, params).fetchone()

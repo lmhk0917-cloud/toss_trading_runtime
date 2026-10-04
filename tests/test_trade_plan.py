@@ -56,6 +56,9 @@ def test_small_feedback_can_only_create_paper_candidate():
     assert plan["readiness"] == "paper_ready"
     assert plan["orders_enabled"] is False
     assert plan["safety"]["orders_called"] is False
+    assert plan["safety"]["live_trade_blocked"] is True
+    assert plan["validation"]["evidence_reflection_enabled"] is True
+    assert plan["validation"]["paper_validation_enabled"] is True
     assert plan["exit"]["take_profit_1_price"] > plan["entry"]["trigger_price"]
     assert plan["risk"]["initial_stop_price"] < plan["entry"]["trigger_price"]
     assert plan["validation"]["net_reward_risk_1"] >= config.TRADE_PLAN_MIN_NET_RR
@@ -80,6 +83,7 @@ def test_positive_feedback_promotes_only_to_shadow_candidate():
     assert plan["entry"]["status"] == "shadow_candidate"
     assert plan["readiness"] == "shadow_ready"
     assert plan["orders_enabled"] is False
+    assert plan["safety"]["live_trade_blocked"] is True
 
 
 def test_negative_expectancy_and_high_risk_are_blocked():

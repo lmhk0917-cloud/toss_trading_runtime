@@ -171,15 +171,15 @@ def render_dashboard_html(snapshot):
 <title>Toss Focused Dashboard</title>
 <style>
 :root {{
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --line: #d9dee7;
-  --text: #1d2430;
-  --muted: #667085;
-  --blue: #1b64d8;
-  --green: #147a42;
-  --red: #b42318;
-  --amber: #b54708;
+  --bg: #0f172a;
+  --panel: #111827;
+  --line: #334155;
+  --text: #e5e7eb;
+  --muted: #94a3b8;
+  --blue: #60a5fa;
+  --green: #34d399;
+  --red: #f87171;
+  --amber: #fbbf24;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -211,7 +211,7 @@ section {{
 }}
 .metric {{
   border-left: 4px solid var(--blue);
-  background: #fbfcfe;
+  background: #182235;
   padding: 10px 12px;
   min-height: 68px;
 }}
@@ -228,7 +228,7 @@ th, td {{
   font-size: 13px;
   overflow-wrap: anywhere;
 }}
-th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
+th {{ color: #cbd5e1; font-size: 12px; background: #182235; }}
 .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .pos {{ color: var(--green); font-weight: 600; }}
 .neg {{ color: var(--red); font-weight: 600; }}
@@ -238,15 +238,15 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
   min-width: 58px;
   padding: 3px 7px;
   border-radius: 999px;
-  background: #eef4ff;
-  color: #1849a9;
+  background: #172554;
+  color: #bfdbfe;
   text-align: center;
   font-size: 12px;
   font-weight: 650;
 }}
-.risk-HIGH {{ background: #fef3f2; color: var(--red); }}
-.risk-MEDIUM {{ background: #fffaeb; color: var(--amber); }}
-.risk-LOW {{ background: #ecfdf3; color: var(--green); }}
+.risk-HIGH {{ background: #3f1d22; color: var(--red); }}
+.risk-MEDIUM {{ background: #3b2f16; color: var(--amber); }}
+.risk-LOW {{ background: #163326; color: var(--green); }}
 .summary {{ color: var(--muted); line-height: 1.4; max-height: 76px; overflow: hidden; }}
 @media (max-width: 900px) {{
   header, main {{ padding-left: 12px; padding-right: 12px; }}
@@ -256,7 +256,7 @@ th {{ color: #344054; font-size: 12px; background: #f9fafb; }}
 }}
 </style>
 </head>
-<body>
+<body data-theme="dark">
 <header>
   <h1>Toss Focused Dashboard</h1>
   <div class="meta">Generated {generated_at} | DB {db_path}</div>

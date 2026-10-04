@@ -46,6 +46,9 @@ def build_adaptive_guard(short_window=None, medium_window=None, min_short=5, min
         "schema": SCHEMA,
         "state": state,
         "risk_multiplier": risk_multiplier,
+        "evidence_reflection_enabled": True,
+        "paper_validation_enabled": True,
+        "live_trade_blocked": True,
         "allow_shadow_promotion": allow_shadow_promotion,
         "allow_parameter_relaxation": allow_shadow_promotion,
         "fixed_exit_rule_promoted": False,
@@ -55,7 +58,8 @@ def build_adaptive_guard(short_window=None, medium_window=None, min_short=5, min
         "policy": (
             "Tighten immediately on deterioration; relax only when both 5d and "
             "20d cost-aware feedback are positive. Exit levels are not tuned "
-            "from short-window performance."
+            "from short-window performance. Defensive states still keep "
+            "paper-only evidence reflection active for test feedback."
         ),
     }
 

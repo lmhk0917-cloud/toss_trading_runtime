@@ -285,7 +285,7 @@ def test_focused_gpt_payload_uses_quality_preserving_compact_evidence():
     result = analyzer.analyze_focused_evidence(evidence, ["AAPL"])
 
     assert "SYMBOL: AAPL" in result["analysis"]
-    assert "quality_preserving_compact_v1" in opener.body
+    assert "quality_preserving_compact_v2" in opener.body
     assert "minute_candles_summary" in opener.body
     assert "feedback_adjustment" in opener.body
     assert "previous_analysis" in opener.body
@@ -303,6 +303,36 @@ def test_focused_gpt_payload_uses_quality_preserving_compact_evidence():
     assert "123456789" not in opener.body
     assert "unusedRawField" not in opener.body
 
+
+def test_relationship_prompt_compaction_keeps_metrics_and_drops_raw_arrays():
+    from openai_gpt import _compact_relationship
+
+    compact = _compact_relationship({
+        "pairs": [{
+            "source_symbol": "NVDA",
+            "target_symbol": "005930",
+            "resolution": {"timeframe": "daily", "tick_source": ["raw"] * 100},
+            "correlation": 0.72,
+            "regression": {"beta": 1.2, "r_squared": 0.51, "raw_points": [1] * 100},
+            "directional_stats": {"hit_ratio_up": 61.0, "large_up": [1] * 100},
+            "rolling_correlation": {"stability": "stable", "windows": [1] * 100},
+            "gap_effect": {"gap_open_corr": 0.4, "raw_matches": [1] * 100},
+        }],
+        "kiwoom_market_context": {
+            "status": "fresh",
+            "sections": {"raw_payload": [1] * 100},
+        },
+    })
+
+    encoded = json.dumps(compact, ensure_ascii=False)
+    assert '"correlation": 0.72' in encoded
+    assert '"beta": 1.2' in encoded
+    assert '"hit_ratio_up": 61.0' in encoded
+    assert "raw_points" not in encoded
+    assert "raw_matches" not in encoded
+    assert "tick_source" not in encoded
+    assert "windows" not in encoded
+    assert "raw_payload" not in encoded
 
 def test_toss_gpt_prompts_include_shared_freshness_and_json_contract():
     analyzer = TossGptAnalyzer(api_key="sk-test", opener=FakeOpener())
@@ -546,6 +576,8 @@ def test_events_and_store_persist_focused_evidence():
         store.save_structured_analysis(analysis_id, structured)
         created = store.create_paper_candidates(analysis_id, evidence, horizons=(5,))
         assert created == 1
+        duplicate_created = store.create_paper_candidates(analysis_id, evidence, horizons=(5,))
+        assert duplicate_created == 0
         assert store.paper_feedback_summary() == []
         assert store.count_rows("price_snapshots") == 1
         assert store.count_rows("candle_snapshots") == 2
@@ -1804,7 +1836,8 @@ def test_quant_feedback_builds_cost_aware_symbol_guidance():
         assert snapshot["overview"]["evaluated_count"] == 5
         assert snapshot["overview"]["cluster_count"] == 4
         assert snapshot["by_symbol"][0]["symbol"] == "NVDA"
-        assert snapshot["symbol_guidance"]["NVDA"]["label"] == "negative_expectancy"
+        assert snapshot["symbol_guidance"]["NVDA"]["label"] == "sample_too_small"
+        assert snapshot["symbol_guidance"]["NVDA"]["sample_count"] == 4
 
         evidence = {"symbol_evidence": {"NVDA": {"symbol": "NVDA"}}}
         attach_quant_feedback_to_evidence(evidence, snapshot)
@@ -1836,8 +1869,9 @@ def test_quant_feedback_uses_direction_and_relationship_regime():
             "confidence": "HIGH",
             "summary": "risk test",
         }])
-        for index, ret in enumerate((-1.0, -0.8, -0.6, -1.2, -0.9)):
-            created_at = "2026-07-01 22:{:02d}:00.000000".format(31 + index * 11)
+        sample_times = ("22:31", "22:42", "22:53", "23:04", "23:15")
+        for sample_time, ret in zip(sample_times, (-1.0, -0.8, -0.6, -1.2, -0.9)):
+            created_at = "2026-07-01 {}:00.000000".format(sample_time)
             store.conn.execute("""
                 INSERT INTO paper_trade_candidates (
                     created_at, analysis_id, symbol, anchor_price, horizon_min,
@@ -1867,9 +1901,15 @@ def test_quant_feedback_uses_direction_and_relationship_regime():
         assert overview["avg_net_directional_return_pct"] > 0
         assert overview["net_directional_success_pct"] == 100.0
         assert snapshot["guidance"]["label"] == "positive_expectancy"
-        assert snapshot["guidance"]["metric_basis"] == "net_directional"
+        assert snapshot["guidance"]["metric_basis"] == "cluster_net_directional"
         assert snapshot["by_regime"][0]["regime"] == "strong"
         assert snapshot["by_regime"][0]["avg_net_directional_return_pct"] > 0
+        cost_sensitivity = snapshot["cost_sensitivity"]
+        assert cost_sensitivity[0]["round_trip_cost_pct"] == 0.1
+        assert cost_sensitivity[0]["avg_net_directional_return_pct"] > cost_sensitivity[-1]["avg_net_directional_return_pct"]
+        profiles = snapshot["parallel_strategy_comparison"]
+        assert [item["profile"] for item in profiles] == ["defensive", "profit_seeking"]
+        assert all(item["live_trade_enabled"] is False for item in profiles)
     finally:
         store.close()
         os.unlink(tmp.name)

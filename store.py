@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "toss_runtime.db")
 OPS_EVENT_SAMPLE_LIMIT = 50000
+DEFAULT_PAPER_CANDIDATE_COOLDOWN_MINUTES = 30
 
 
 class TossRuntimeStore(object):
@@ -291,7 +292,9 @@ class TossRuntimeStore(object):
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_events_symbol_time ON event_logs(symbol, detected_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_due ON paper_trade_candidates(status, due_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_status_eval_symbol ON paper_trade_candidates(status, evaluated_at, symbol)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_symbol_horizon_created ON paper_trade_candidates(symbol, horizon_min, created_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_structured_analysis_symbol ON structured_analysis(symbol, analysis_id)")
+        self._execute_write("CREATE INDEX IF NOT EXISTS idx_structured_analysis_analysis_symbol ON structured_analysis(analysis_id, symbol)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_status_time ON paper_execution_orders(status, updated_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_symbol_time ON paper_execution_orders(symbol, created_at)")
         self._execute_write("CREATE INDEX IF NOT EXISTS idx_paper_execution_event_order_time ON paper_execution_events(paper_order_id, event_at)")
@@ -432,15 +435,44 @@ class TossRuntimeStore(object):
         self._commit()
         return cursor.lastrowid
 
-    def create_paper_candidates(self, analysis_id, evidence, horizons=(5, 10, 30, 60)):
+    def create_paper_candidates(
+        self,
+        analysis_id,
+        evidence,
+        horizons=(5, 10, 30, 60),
+        cooldown_minutes=DEFAULT_PAPER_CANDIDATE_COOLDOWN_MINUTES,
+    ):
         created = 0
         collected_at = evidence.get("collected_at") or _now()
+        created_at = _now()
+        cooldown_start = _sqlite_datetime_plus_minutes(created_at, -int(cooldown_minutes or 0))
+        decisions = {
+            str(row["symbol"] or "").upper(): str(row["final_decision"] or "UNKNOWN").upper()
+            for row in self.conn.execute(
+                "SELECT symbol, final_decision FROM structured_analysis WHERE analysis_id = ?",
+                (analysis_id,),
+            ).fetchall()
+        }
         for item in ((evidence.get("prices") or {}).get("result") or []):
             symbol = str(item.get("symbol") or "").upper()
             price = _to_float(item.get("lastPrice"))
             if not symbol or price <= 0:
                 continue
+            decision = decisions.get(symbol, "UNKNOWN")
             for horizon in horizons:
+                recent = self.conn.execute("""
+                    SELECT p.id
+                    FROM paper_trade_candidates p
+                    LEFT JOIN structured_analysis s
+                        ON s.analysis_id = p.analysis_id AND s.symbol = p.symbol
+                    WHERE p.symbol = ? AND p.horizon_min = ?
+                      AND p.created_at >= ?
+                      AND UPPER(COALESCE(s.final_decision, 'UNKNOWN')) = ?
+                    ORDER BY p.created_at DESC, p.id DESC
+                    LIMIT 1
+                """, (symbol, int(horizon), cooldown_start, decision)).fetchone()
+                if recent:
+                    continue
                 due_at = _sqlite_datetime_plus_minutes(collected_at, horizon)
                 self._execute_write("""
                     INSERT INTO paper_trade_candidates (
@@ -448,14 +480,19 @@ class TossRuntimeStore(object):
                         due_at, status, payload_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    _now(),
+                    created_at,
                     analysis_id,
                     symbol,
                     price,
                     int(horizon),
                     due_at,
                     "pending",
-                    _json({"source_timestamp": item.get("timestamp"), "currency": item.get("currency")}),
+                    _json({
+                        "source_timestamp": item.get("timestamp"),
+                        "currency": item.get("currency"),
+                        "final_decision": decision,
+                        "candidate_cooldown_minutes": int(cooldown_minutes or 0),
+                    }),
                 ))
                 created += 1
         self._commit()

@@ -24,6 +24,9 @@ def test_short_positive_does_not_override_negative_medium_window():
     )
     assert guard["state"] == "short_positive_medium_negative"
     assert guard["allow_shadow_promotion"] is False
+    assert guard["evidence_reflection_enabled"] is True
+    assert guard["paper_validation_enabled"] is True
+    assert guard["live_trade_blocked"] is True
     assert guard["risk_multiplier"] == 0.50
     assert guard["fixed_exit_rule_promoted"] is False
 
@@ -71,6 +74,8 @@ def test_both_positive_windows_allow_only_shadow_promotion():
     )
     assert guard["state"] == "consistent_positive"
     assert guard["allow_shadow_promotion"] is True
+    assert guard["evidence_reflection_enabled"] is True
+    assert guard["live_trade_blocked"] is True
     assert guard["risk_multiplier"] == 1.0
 
 def test_feedback_windows_attach_symbol_guard_to_analysis_evidence():

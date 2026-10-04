@@ -79,6 +79,8 @@ def build_quant_feedback_snapshot(conn, symbols=None, days=DEFAULT_DAYS, min_sam
         "by_decision": by_decision,
         "by_regime": by_regime,
         "symbol_guidance": symbol_guidance,
+        "cost_sensitivity": _cost_sensitivity(rows),
+        "parallel_strategy_comparison": _parallel_strategy_comparison(rows),
         "guidance": _guidance(overview, min_sample=min_sample),
     }
 
@@ -187,6 +189,8 @@ def compact_quant_feedback(snapshot, symbols=None, max_items=8):
         "by_symbol": by_symbol,
         "by_decision": [_compact_metric(item) for item in (snapshot.get("by_decision") or [])[:max_items]],
         "by_regime": [_compact_metric(item) for item in (snapshot.get("by_regime") or [])[:max_items]],
+        "cost_sensitivity": snapshot.get("cost_sensitivity") or [],
+        "parallel_strategy_comparison": snapshot.get("parallel_strategy_comparison") or [],
         "symbol_guidance": {symbol: (snapshot.get("symbol_guidance") or {}).get(symbol) for symbol in symbols if symbol in (snapshot.get("symbol_guidance") or {})},
         "guidance": snapshot.get("guidance"),
     }
@@ -302,6 +306,8 @@ def _metric_block(rows):
     cluster_net = _values(clusters, "net_return_pct")
     directional_returns = _values(rows, "directional_return_pct")
     net_directional_returns = _values(rows, "net_directional_return_pct")
+    cluster_directional_returns = _values(clusters, "directional_return_pct")
+    cluster_net_directional_returns = _values(clusters, "net_directional_return_pct")
     return {
         "evaluated_count": len(rows),
         "avg_return_pct": _avg(returns),
@@ -322,6 +328,13 @@ def _metric_block(rows):
         "avg_cluster_net_return_pct": _avg(cluster_net),
         "cluster_win_rate_pct": _win_rate(cluster_returns),
         "cluster_profit_factor": _profit_factor(cluster_returns),
+        "cluster_directional_evaluated_count": len(cluster_directional_returns),
+        "avg_cluster_directional_return_pct": _avg(cluster_directional_returns),
+        "avg_cluster_net_directional_return_pct": _avg(cluster_net_directional_returns),
+        "cluster_directional_success_pct": _win_rate(cluster_directional_returns),
+        "net_cluster_directional_success_pct": _win_rate(cluster_net_directional_returns),
+        "cluster_directional_profit_factor": _profit_factor(cluster_directional_returns),
+        "net_cluster_directional_profit_factor": _profit_factor(cluster_net_directional_returns),
         "directional_evaluated_count": len(directional_returns),
         "avg_directional_return_pct": _avg(directional_returns),
         "avg_net_directional_return_pct": _avg(net_directional_returns),
@@ -334,8 +347,23 @@ def _metric_block(rows):
 
 
 def _guidance(metrics, min_sample=DEFAULT_MIN_SAMPLE):
+    cluster_directional_count = int(metrics.get("cluster_directional_evaluated_count") or 0)
     directional_count = int(metrics.get("directional_evaluated_count") or 0)
-    if directional_count >= int(min_sample):
+    cluster_count = int(metrics.get("cluster_count") or 0)
+    independent_count = cluster_directional_count or cluster_count
+    if cluster_directional_count >= int(min_sample):
+        count = cluster_directional_count
+        expectancy = metrics.get("avg_cluster_net_directional_return_pct")
+        win_rate = metrics.get("net_cluster_directional_success_pct")
+        profit_factor = metrics.get("net_cluster_directional_profit_factor") or 0
+        basis = "cluster_net_directional"
+    elif cluster_count >= int(min_sample):
+        count = cluster_count
+        expectancy = metrics.get("avg_cluster_net_return_pct")
+        win_rate = metrics.get("cluster_win_rate_pct")
+        profit_factor = metrics.get("cluster_profit_factor") or 0
+        basis = "cluster_net_raw"
+    elif directional_count >= int(min_sample):
         count = directional_count
         expectancy = metrics.get("avg_net_directional_return_pct")
         win_rate = metrics.get("net_directional_success_pct")
@@ -346,16 +374,15 @@ def _guidance(metrics, min_sample=DEFAULT_MIN_SAMPLE):
         expectancy = metrics.get("expectancy_pct")
         win_rate = metrics.get("net_win_rate_pct")
         profit_factor = metrics.get("net_profit_factor") or 0
-        basis = "net_raw"
+        basis = "net_raw_unclustered_insufficient"
     adverse = metrics.get("adverse_path_rate_pct") or 0
-    if count < int(min_sample):
-        return {"label": "sample_too_small", "summary": "Do not tune from this sample yet.", "sample_count": count, "metric_basis": basis}
+    if independent_count < int(min_sample):
+        return {"label": "sample_too_small", "summary": "Do not tune from this sample yet.", "sample_count": independent_count, "metric_basis": basis}
     if expectancy is not None and expectancy > 0 and (win_rate or 0) >= 50 and profit_factor >= 1:
         return {"label": "positive_expectancy", "summary": "Feedback supports keeping this setup when live evidence matches.", "sample_count": count, "metric_basis": basis}
     if expectancy is not None and (expectancy < 0 or (win_rate is not None and win_rate < 45) or adverse >= 50):
         return {"label": "negative_expectancy", "summary": "Require stronger confirmation or lower GPT confidence for this bucket.", "sample_count": count, "metric_basis": basis}
     return {"label": "mixed_expectancy", "summary": "Keep as watch-only until the next feedback window clarifies.", "sample_count": count, "metric_basis": basis}
-
 
 def _cluster_representatives(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES):
     clusters = []
@@ -377,6 +404,81 @@ def _cluster_representatives(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES
         representatives.append(cluster["rows"][0])
     return representatives
 
+
+def _cost_sensitivity(rows, costs=None):
+    costs = costs or (0.10, 0.20, float(ROUND_TRIP_COST_PCT or 0.0))
+    representatives = _cluster_representatives([
+        row for row in rows if row.get("directional_return_pct") is not None
+    ])
+    directional = _values(representatives, "directional_return_pct")
+    result = []
+    for cost in sorted(set(round(float(item), 4) for item in costs)):
+        net = [value - cost for value in directional]
+        result.append({
+            "round_trip_cost_pct": cost,
+            "independent_sample_count": len(net),
+            "avg_net_directional_return_pct": _avg(net),
+            "net_directional_success_pct": _win_rate(net),
+            "net_directional_profit_factor": _profit_factor(net),
+        })
+    return result
+
+
+def _parallel_strategy_comparison(rows):
+    representatives = _cluster_representatives(rows)
+    profiles = (
+        {
+            "profile": "defensive",
+            "label": "Defensive",
+            "horizon_min": 10,
+            "min_interest_score": 75,
+            "allowed_risk": set(("LOW", "MEDIUM")),
+            "eligible_decisions": set(("WATCH", "OBSERVE")),
+            "research_note": "Strict confirmation-only shadow test.",
+        },
+        {
+            "profile": "profit_seeking",
+            "label": "Profit Seeking",
+            "horizon_min": 60,
+            "min_interest_score": 65,
+            "allowed_risk": set(("LOW", "MEDIUM", "HIGH")),
+            "eligible_decisions": set(("WATCH", "OBSERVE", "HOLD", "RISK")),
+            "research_note": "Contrarian shadow test of high-score cautious decisions.",
+        },
+    )
+    result = []
+    for profile in profiles:
+        selected = [
+            row for row in representatives
+            if str(row.get("decision") or "UNKNOWN").upper() in profile["eligible_decisions"]
+            and int(row.get("horizon_min") or 0) == profile["horizon_min"]
+            and int(row.get("interest_score") or 0) >= profile["min_interest_score"]
+            and str(row.get("risk_level") or "UNKNOWN").upper() in profile["allowed_risk"]
+        ]
+        values = _values(selected, "net_return_pct")
+        avg_net = _avg(values)
+        profit_factor = _profit_factor(values)
+        if len(values) < 20:
+            status = "collecting"
+        elif avg_net is not None and avg_net > 0 and profit_factor >= 1:
+            status = "positive_candidate"
+        else:
+            status = "edge_not_proven"
+        result.append({
+            "profile": profile["profile"],
+            "label": profile["label"],
+            "status": status,
+            "independent_sample_count": len(values),
+            "horizon_min": profile["horizon_min"],
+            "min_interest_score": profile["min_interest_score"],
+            "eligible_decisions": sorted(profile["eligible_decisions"]),
+            "research_note": profile["research_note"],
+            "avg_net_return_pct": avg_net,
+            "net_win_rate_pct": _win_rate(values),
+            "net_profit_factor": profit_factor,
+            "live_trade_enabled": False,
+        })
+    return result
 
 def _compact_metric(item):
     keys = [
