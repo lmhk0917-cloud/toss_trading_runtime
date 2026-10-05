@@ -10,6 +10,9 @@ except ImportError:  # pragma: no cover
     import config
 
 
+import math
+
+
 SCHEMA = "trade_plan_v1"
 
 
@@ -40,6 +43,7 @@ def build_trade_plan(analysis, evidence):
     min_score = float(getattr(config, "TRADE_PLAN_MIN_ENTRY_SCORE", 75))
     min_samples = int(getattr(config, "TRADE_PLAN_MIN_FEEDBACK_SAMPLES", 20))
     min_net_rr = float(getattr(config, "TRADE_PLAN_MIN_NET_RR", 1.20))
+    minute_samples = int(max(0, _number(minute.get("sample"), 0)))
 
     blockers = []
     warnings = []
@@ -53,19 +57,18 @@ def build_trade_plan(analysis, evidence):
         blockers.append("interest_score_below_{:.0f}".format(min_score))
     if risk == "HIGH":
         blockers.append("high_risk")
+    elif risk not in ("LOW", "MEDIUM"):
+        blockers.append("invalid_risk_level")
     if confidence not in ("MEDIUM", "HIGH"):
         blockers.append("confidence_below_medium")
-    if int(minute.get("sample") or 0) < 30:
+    if minute_samples < 30:
         blockers.append("insufficient_minute_candles")
     if _number(minute.get("rsi14")) is not None and _number(minute.get("rsi14")) >= 78:
         blockers.append("short_term_overbought")
 
     guidance_label = str(guidance.get("label") or "no_feedback")
-    sample_count = int(
-        guidance.get("sample_count")
-        or feedback.get("evaluated_count")
-        or 0
-    )
+    sample_count = int(max(0, _number(guidance.get("sample_count"))
+                           or _number(feedback.get("evaluated_count")) or 0))
     expectancy = _number(feedback.get("expectancy_pct"))
     profit_factor = _number(feedback.get("net_profit_factor"))
     if guidance_label in ("negative_expectancy", "mixed_expectancy"):
@@ -125,6 +128,7 @@ def build_trade_plan(analysis, evidence):
             "initial_stop_price": levels["stop_price"],
             "initial_stop_distance_pct": levels["stop_distance_pct"],
             "max_holding_minutes": int(getattr(config, "TRADE_PLAN_MAX_HOLD_MINUTES", 60)),
+            "holding_clock": "entry_fill",
             "position_size_enabled": False,
             "paper_risk_multiplier": adaptive_guard.get("risk_multiplier", 0.50),
             "note": "Position sizing remains disabled until shadow validation and account-level risk limits pass.",
@@ -140,6 +144,13 @@ def build_trade_plan(analysis, evidence):
             "stop_fill_warning": "A stop trigger does not guarantee the stop price in a fast market.",
         },
         "validation": {
+            "gate_policy_version": "finite_input_guard_v2",
+            "entry_score": score,
+            "minimum_entry_score": min_score,
+            "initial_decision": decision,
+            "risk_level": risk,
+            "confidence": confidence,
+            "minute_sample_count": minute_samples,
             "feedback_label": guidance_label,
             "feedback_samples": sample_count,
             "net_expectancy_pct": expectancy,
@@ -236,9 +247,10 @@ def _price(symbol_evidence):
 
 def _number(value, default=None):
     try:
-        if value in (None, ""):
+        if value in (None, "") or isinstance(value, bool):
             return default
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
     except (TypeError, ValueError):
         return default
 
