@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 
 from toss_trading_runtime.paper_execution import (
@@ -7,6 +8,7 @@ from toss_trading_runtime.paper_execution import (
     simulate_order,
 )
 from toss_trading_runtime.store import TossRuntimeStore
+from toss_trading_runtime.trade_plan import build_trade_plan
 
 
 def _plan(status="paper_candidate"):
@@ -42,6 +44,66 @@ def _plan(status="paper_candidate"):
             "adaptive_guard": {"state": "short_positive_medium_negative"},
         },
     }
+
+
+def test_new_plan_declares_fill_clock_without_enabling_orders():
+    plan = build_trade_plan({"symbol": "NVDA"}, {})
+    assert plan["risk"]["holding_clock"] == "entry_fill"
+    assert plan["orders_enabled"] is False
+
+
+def test_delayed_fill_uses_explicit_clock_and_preserves_legacy():
+    points = [
+        {"at": "2026-07-31 22:40:00.000000", "price": 100.0},
+        {"at": "2026-07-31 23:30:00.000000", "price": 101.0},
+        {"at": "2026-07-31 23:40:00.000000", "price": 101.5},
+    ]
+    legacy = simulate_order(
+        _plan(), points, "2026-07-31 22:30:00.000000",
+        asof="2026-07-31 23:30:00.000000",
+    )
+    assert legacy["status"] == "closed_timeout"
+    assert legacy["holding_clock"] == "plan_created"
+    plan = _plan()
+    plan["risk"]["holding_clock"] = "entry_fill"
+    current = simulate_order(
+        plan, points, "2026-07-31 22:30:00.000000",
+        asof="2026-07-31 23:30:00.000000",
+    )
+    assert current["remaining_fraction"] == 1.0
+    assert current["terminal"] is False
+    assert current["holding_deadline"].startswith("2026-07-31 23:40:00")
+    closed = simulate_order(
+        plan, points, "2026-07-31 22:30:00.000000",
+        asof="2026-07-31 23:40:00.000000",
+    )
+    assert closed["status"] == "closed_timeout"
+    assert closed["exit_at"].startswith("2026-07-31 23:40:00")
+    assert closed["net_return_pct"] < closed["gross_return_pct"]
+    assert closed["orders_called"] is False
+
+
+def test_closed_position_excursions_ignore_post_exit_prices():
+    result = simulate_order(
+        _plan(), [
+            {"at": "2026-07-31 22:30:01.000000", "price": 100.0},
+            {"at": "2026-07-31 22:31:00.000000", "price": 98.0},
+            {"at": "2026-07-31 22:32:00.000000", "price": 120.0},
+            {"at": "2026-07-31 22:33:00.000000", "price": 80.0},
+        ], "2026-07-31 22:30:00.000000", asof="2026-07-31 22:40:00.000000",
+    )
+    assert result["status"] == "closed_stop"
+    assert result["mfe_pct"] == 0.0
+    assert result["mae_pct"] == -2.0
+
+
+def test_invalid_holding_clock_fails_closed():
+    plan = _plan()
+    plan["risk"]["holding_clock"] = "unknown"
+    result = simulate_order(plan, [], "2026-07-31 22:30:00.000000")
+    assert result["status"] == "rejected_by_guard"
+    assert result["exit_reason"] == "invalid_holding_policy"
+    assert result["orders_called"] is False
 
 
 def test_blocked_plan_is_recorded_without_broker_execution():
@@ -149,3 +211,43 @@ def test_store_persists_order_states_events_and_cost_aware_return():
     assert event_count >= 5
     assert readiness["readiness"] == "paper_collecting"
     assert readiness["live_order_enabled"] is False
+
+
+def test_open_position_refreshes_mark_without_status_transition(tmp_path):
+    store = TossRuntimeStore(str(tmp_path / "marks.db"))
+    try:
+        store.create_paper_execution_orders(
+            1, [{"symbol": "NVDA", "trade_plan": _plan()}],
+            created_at="2026-07-31 22:30:00.000000",
+        )
+        for at, price in [("2026-07-31 22:30:01.000000", 100.0),
+                          ("2026-07-31 22:35:00.000000", 101.0)]:
+            store.conn.execute(
+                "INSERT INTO price_snapshots(collected_at,symbol,price,currency,payload_json) VALUES(?,'NVDA',?,'USD','{}')",
+                (at, price),
+            )
+        store.conn.commit()
+        store.advance_paper_execution_orders(now="2026-07-31 22:30:02.000000")
+        before = store.conn.execute("SELECT result_json FROM paper_execution_orders").fetchone()[0]
+        result = store.advance_paper_execution_orders(now="2026-07-31 22:35:01.000000")
+        after = store.conn.execute("SELECT result_json FROM paper_execution_orders").fetchone()[0]
+        assert result["advanced"] == 1
+        assert json.loads(before)["status"] == json.loads(after)["status"]
+        assert json.loads(after)["net_return_pct"] > json.loads(before)["net_return_pct"]
+        assert store.advance_paper_execution_orders(now="2026-07-31 22:35:01.000000")["advanced"] == 0
+    finally:
+        store.close()
+
+
+def test_order_clock_cannot_precede_saved_gpt_decision(tmp_path):
+    store = TossRuntimeStore(str(tmp_path / "decision_clock.db"))
+    try:
+        store.conn.execute("INSERT INTO analysis_results(id,analyzed_at,mode,symbols) VALUES(1,?,'test','NVDA')",
+                           ("2026-09-01 23:00:10.000000",))
+        store.conn.commit()
+        store.create_paper_execution_orders(1, [{"symbol":"NVDA","trade_plan":_plan()}],
+                                           created_at="2026-09-01 23:00:00.000000")
+        order = store.conn.execute("SELECT created_at FROM paper_execution_orders").fetchone()
+        assert order["created_at"] == "2026-09-01 23:00:10.000000"
+    finally:
+        store.close()

@@ -556,6 +556,12 @@ class TossRuntimeStore(object):
     def create_paper_execution_orders(self, analysis_id, structured, created_at=None):
         """Persist paper/shadow plans and guard rejections without broker calls."""
         created_at = created_at or _now()
+        analysis = self.conn.execute(
+            "SELECT analyzed_at FROM analysis_results WHERE id = ?", (analysis_id,)
+        ).fetchone()
+        if analysis and analysis["analyzed_at"]:
+            # A GPT plan cannot be filled before its decision was available.
+            created_at = max(created_at, analysis["analyzed_at"])
         created = 0
         for item in structured or []:
             symbol = str(item.get("symbol") or "").upper()
@@ -610,7 +616,8 @@ class TossRuntimeStore(object):
                 row["symbol"], row["created_at"], now,
             )
             result = simulate_order(plan, points, row["created_at"], asof=now)
-            if result.get("status") == row["status"] and not result.get("terminal"):
+            if (result.get("status") == row["status"] and not result.get("terminal")
+                    and row["result_json"] == _json(result)):
                 continue
             self._execute_write("""
                 UPDATE paper_execution_orders
@@ -1390,5 +1397,3 @@ def _merge_min(left, right):
     if left is None:
         return right
     return min(left, right)
-
-

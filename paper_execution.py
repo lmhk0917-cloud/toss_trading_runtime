@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 
 SCHEMA = "paper_execution_v1"
-ASSUMPTION_VERSION = "paper_fill_v1_conservative"
+ASSUMPTION_VERSION = "paper_fill_v2_explicit_holding_clock"
 TERMINAL_STATES = set((
     "rejected_by_guard",
     "canceled_no_fill",
@@ -75,6 +75,16 @@ def simulate_order(plan, price_points, created_at, asof=None, entry_timeout_minu
     target_1 = _number(exit_plan.get("take_profit_1_price"))
     target_2 = _number(exit_plan.get("take_profit_2_price"))
     max_hold = int(_number(risk.get("max_holding_minutes"), 60) or 60)
+    holding_clock = risk.get("holding_clock", "plan_created")
+    if holding_clock not in ("plan_created", "entry_fill") or max_hold <= 0:
+        events.append(_event(
+            "order_rejected", created_at, None, "rejected_by_guard",
+            note="invalid_holding_policy",
+        ))
+        return _result(
+            plan, "rejected_by_guard", events, terminal=True,
+            exit_reason="invalid_holding_policy",
+        )
     trailing_pct = _number(exit_plan.get("trailing_after_tp1_pct"), 0.0) or 0.0
     breakeven_stop = _number(exit_plan.get("move_stop_after_tp1_to"), stop)
     entry_expiry = created_dt + timedelta(
@@ -136,6 +146,13 @@ def simulate_order(plan, price_points, created_at, asof=None, entry_timeout_minu
             exit_reason=reason,
         )
 
+    if holding_clock == "entry_fill":
+        horizon_end = fill_point["dt"] + timedelta(minutes=max_hold)
+        eligible_points = [
+            point for point in points
+            if fill_point["dt"] <= point["dt"] <= min(asof_dt, horizon_end)
+        ]
+
     rates = _cost_rates(plan)
     raw_entry = fill_point["price"]
     fill_price = raw_entry * (1.0 + rates["slippage_each_side_pct"] / 100.0)
@@ -158,9 +175,6 @@ def simulate_order(plan, price_points, created_at, asof=None, entry_timeout_minu
         point for point in eligible_points
         if point["dt"] >= fill_point["dt"]
     ]
-    raw_prices = [point["price"] for point in post_fill_points] or [raw_entry]
-    mfe_pct = (max(raw_prices) / raw_entry - 1.0) * 100.0
-    mae_pct = (min(raw_prices) / raw_entry - 1.0) * 100.0
     terminal_state = None
     exit_reason = None
 
@@ -227,6 +241,14 @@ def simulate_order(plan, price_points, created_at, asof=None, entry_timeout_minu
         exit_reason = "max_holding_time"
 
     status = terminal_state or ("partial" if tp1_hit else "open")
+    # Closed-position excursions must not include prices after the actual exit.
+    excursion_end = _parse_dt(exit_legs[-1]["at"]) if remaining == 0 and exit_legs else None
+    raw_prices = [
+        point["price"] for point in post_fill_points
+        if excursion_end is None or point["dt"] <= excursion_end
+    ] or [raw_entry]
+    mfe_pct = (max(raw_prices) / raw_entry - 1.0) * 100.0
+    mae_pct = (min(raw_prices) / raw_entry - 1.0) * 100.0
     latest_point = post_fill_points[-1] if post_fill_points else fill_point
     performance = _performance(
         initial_cost=initial_cost,
@@ -245,6 +267,8 @@ def simulate_order(plan, price_points, created_at, asof=None, entry_timeout_minu
     )
     result.update({
         "entry_filled_at": fill_point["at"],
+        "holding_clock": holding_clock,
+        "holding_deadline": _format_dt(horizon_end),
         "entry_price": round(fill_price, 6),
         "raw_entry_price": round(raw_entry, 6),
         "remaining_fraction": round(remaining, 6),
